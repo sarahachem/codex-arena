@@ -33,6 +33,8 @@ Ask one plain question: what do you want done — generate something new, or rev
 If reviewing something existing → skip Phase 1, go to Setup.
 If generating something new → Phase 1.
 
+**State the direction explicitly, every time, before anything runs** — this is not implied by phase, the user shouldn't have to infer it: "Claude is orchestrating, Codex is the evaluator" (default — this is Phase 2) or "Codex is building, Claude is the evaluator" (only if the user asked for the reversed direction — Phase 2b). Say it in the same breath as the model/budget confirmation from "Before starting," not buried or assumed.
+
 ## Phase 1 — SPEC (only when the artifact doesn't exist yet)
 
 Ask one open question: what should this cover? Get the answer as free text — never a structured multi-part questionnaire or a wall of option cards. That's overwhelming and isn't how people naturally describe what they want.
