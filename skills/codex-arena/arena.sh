@@ -23,11 +23,22 @@
 #   arena.sh --artifact FILE --brief FILE [--max-rounds N] [--max-tokens N] [--resume THREAD_ID]
 #     Runs the full conversation using an existing brief file.
 #
+#   --evaluator codex (default): Codex critiques itself, proposes fixes as text.
+#   --evaluator claude: reversed — Codex BUILDS (via codex exec, still read-only,
+#     text-only), Claude EVALUATES via a direct Anthropic API call. Needs a real
+#     ANTHROPIC_API_KEY — prompted for interactively on first use (via
+#     claude_auth.sh) and cached at ~/.claude/skills/codex-arena/.anthropic_key
+#     if you opt in. This is a genuinely separate, billed API path — not part
+#     of any Claude Code/Claude.ai subscription. Ask before assuming the user
+#     wants to set this up; it costs real money on its own account.
+#
 # Exit codes: 0 = converged/approved, 1 = stopped without approval
 #             (round/token limit, or nothing left to propose), 2 = setup
-#             error, 3 = a codex call failed.
+#             error, 3 = a codex or claude call failed.
 
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ARTIFACT=""
 BRIEF=""
@@ -38,6 +49,7 @@ STATE_DIR="${CODEX_ARENA_STATE_DIR:-/tmp/codex-arena}"
 INIT_MODE=0
 INIT_OUT=""
 NO_RUN=0
+EVALUATOR="codex"
 
 BEGIN_MARK="===BEGIN_PROPOSED_ARTIFACT==="
 END_MARK="===END_PROPOSED_ARTIFACT==="
@@ -52,10 +64,16 @@ while [ $# -gt 0 ]; do
     --resume) THREAD_ID="$2"; shift 2 ;;
     --max-rounds) MAX_ROUNDS="$2"; shift 2 ;;
     --max-tokens) MAX_TOKENS="$2"; shift 2 ;;
+    --evaluator) EVALUATOR="$2"; shift 2 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$EVALUATOR" in
+  codex|claude) ;;
+  *) echo "error: --evaluator must be 'codex' (default) or 'claude'" >&2; exit 2 ;;
+esac
 
 # ---------------------------------------------------------------- init ----
 if [ "$INIT_MODE" -eq 1 ]; then
@@ -201,6 +219,21 @@ if ! command -v codex >/dev/null 2>&1; then
   exit 2
 fi
 
+if [ "$EVALUATOR" = "claude" ]; then
+  if [ ! -f "$SCRIPT_DIR/claude_auth.sh" ] || [ ! -f "$SCRIPT_DIR/claude_call.sh" ]; then
+    echo "error: --evaluator claude needs claude_auth.sh and claude_call.sh next to this script" >&2
+    exit 2
+  fi
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/claude_auth.sh"
+  if ! ensure_anthropic_key; then
+    echo "error: no Anthropic API key — can't run --evaluator claude without one" >&2
+    exit 2
+  fi
+fi
+
+echo "evaluator: $EVALUATOR $( [ "$EVALUATOR" = "claude" ] && echo "(Codex builds, Claude evaluates via direct API call)" || echo "(Codex builds and evaluates itself, read-only every round)" )"
+
 mkdir -p "$STATE_DIR"
 SLUG="$(basename "$ARTIFACT" | tr -c 'a-zA-Z0-9' '-')"
 VERDICT_FILE="$STATE_DIR/${SLUG}-verdict.txt"
@@ -232,22 +265,23 @@ ROUND=1
 CANDIDATE=""
 OUTCOME=""
 
-while true; do
-  if [ -z "$THREAD_ID" ]; then
-    echo "== round $ROUND (new session) =="
-    codex exec -s read-only --skip-git-repo-check --json \
-      -o "$VERDICT_FILE" \
-      "$(cat "$BRIEF")" \
-      < /dev/null 2>/dev/null > "$RAW_FILE"
-    NEW_THREAD="$(grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' "$RAW_FILE" | grep -o '[a-f0-9-]\{36\}')"
-    if [ -z "$NEW_THREAD" ] || [ ! -s "$VERDICT_FILE" ]; then
-      echo "error: codex call failed — check auth (codex login status) and model config" >&2
-      exit 3
-    fi
-    THREAD_ID="$NEW_THREAD"
-  elif [ -n "$CANDIDATE" ]; then
-    echo "== round $ROUND (resuming $THREAD_ID — reviewing proposed fix as a hypothetical) =="
-    RESUME_PROMPT="Here is a candidate revision incorporating the fix you proposed. This has NOT been
+if [ "$EVALUATOR" = "codex" ]; then
+  while true; do
+    if [ -z "$THREAD_ID" ]; then
+      echo "== round $ROUND (new session) =="
+      codex exec -s read-only --skip-git-repo-check --json \
+        -o "$VERDICT_FILE" \
+        "$(cat "$BRIEF")" \
+        < /dev/null 2>/dev/null > "$RAW_FILE"
+      NEW_THREAD="$(grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' "$RAW_FILE" | grep -o '[a-f0-9-]\{36\}')"
+      if [ -z "$NEW_THREAD" ] || [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex call failed — check auth (codex login status) and model config" >&2
+        exit 3
+      fi
+      THREAD_ID="$NEW_THREAD"
+    elif [ -n "$CANDIDATE" ]; then
+      echo "== round $ROUND (resuming $THREAD_ID — reviewing proposed fix as a hypothetical) =="
+      RESUME_PROMPT="Here is a candidate revision incorporating the fix you proposed. This has NOT been
 written to the real file — it is purely hypothetical, for you to re-review as if it replaced
 $ARTIFACT. Check it against the same brief and criteria as before.
 
@@ -258,65 +292,183 @@ $END_MARK
 If this fully resolves everything, respond with the same PASS verdict format as before and
 omit the proposal block. If problems remain, describe them and propose an updated corrected
 version using the same $BEGIN_MARK / $END_MARK markers."
-    codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
-      -o "$VERDICT_FILE" \
-      "$RESUME_PROMPT" \
-      < /dev/null 2>/dev/null > "$RAW_FILE"
-    if [ ! -s "$VERDICT_FILE" ]; then
-      echo "error: codex resume failed for thread $THREAD_ID" >&2
+      codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
+        -o "$VERDICT_FILE" \
+        "$RESUME_PROMPT" \
+        < /dev/null 2>/dev/null > "$RAW_FILE"
+      if [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex resume failed for thread $THREAD_ID" >&2
+        exit 3
+      fi
+    else
+      echo "== round $ROUND (resuming $THREAD_ID) =="
+      codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
+        -o "$VERDICT_FILE" \
+        "Re-check $ARTIFACT against the same brief and criteria. End with the same exact verdict format as before." \
+        < /dev/null 2>/dev/null > "$RAW_FILE"
+      if [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex resume failed for thread $THREAD_ID" >&2
+        exit 3
+      fi
+    fi
+
+    ROUND_TOKENS="$(grep -o '"type":"turn.completed","usage":{[^}]*}' "$RAW_FILE" \
+      | grep -o '"input_tokens":[0-9]*\|"output_tokens":[0-9]*' \
+      | grep -o '[0-9]*' | awk '{sum+=$1} END{print sum+0}')"
+    echo "$ROUND_TOKENS" >> "$LOG_FILE"
+    TOTAL_SPENT=$((TOTAL_SPENT + ROUND_TOKENS))
+
+    echo ""
+    echo "--- round $ROUND critique ---"
+    cat "$VERDICT_FILE"
+    echo ""
+    echo "(round tokens: $ROUND_TOKENS, cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
+    echo ""
+
+    NEW_PROPOSAL="$(extract_proposal "$VERDICT_FILE")"
+    PASSED=0
+    grep -qE '(VERDICT: APPROVED|RESULT: PASS)' "$VERDICT_FILE" && PASSED=1
+
+    if [ "$PASSED" -eq 1 ]; then
+      OUTCOME="converged"
+      break
+    fi
+
+    if [ -z "$NEW_PROPOSAL" ]; then
+      OUTCOME="stalled — Codex flagged problems but proposed no fix to iterate on"
+      break
+    fi
+    CANDIDATE="$NEW_PROPOSAL"
+    printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
+
+    if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
+      OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
+      break
+    fi
+    if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
+      OUTCOME="round limit reached ($MAX_ROUNDS)"
+      break
+    fi
+    ROUND=$((ROUND + 1))
+  done
+
+else
+  # ------------------------------------------------- reversed: codex builds, claude evaluates ----
+  CLAUDE_FEEDBACK=""
+  while true; do
+    # 1. Codex builds or revises (still read-only — producing text, not writing files)
+    if [ -z "$THREAD_ID" ]; then
+      echo "== round $ROUND: Codex builds (new session) =="
+      BUILD_PROMPT="$(cat "$BRIEF")
+
+Produce the artifact content per the brief above (or, if it already exists, the additions/fix it
+calls for). Output ONLY the content, wrapped exactly like this, nothing outside the markers:
+$BEGIN_MARK
+<content>
+$END_MARK"
+      codex exec -s read-only --skip-git-repo-check --json \
+        -o "$VERDICT_FILE" \
+        "$BUILD_PROMPT" \
+        < /dev/null 2>/dev/null > "$RAW_FILE"
+      NEW_THREAD="$(grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' "$RAW_FILE" | grep -o '[a-f0-9-]\{36\}')"
+      if [ -z "$NEW_THREAD" ] || [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex build call failed — check auth (codex login status) and model config" >&2
+        exit 3
+      fi
+      THREAD_ID="$NEW_THREAD"
+    else
+      echo "== round $ROUND: Codex revises (resuming $THREAD_ID) =="
+      codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
+        -o "$VERDICT_FILE" \
+        "The evaluator raised this objection: $CLAUDE_FEEDBACK
+
+Revise your proposal to address it, or explain why you're keeping it as-is if the objection
+doesn't hold up. Output the (possibly revised) content wrapped exactly like this:
+$BEGIN_MARK
+<content>
+$END_MARK" \
+        < /dev/null 2>/dev/null > "$RAW_FILE"
+      if [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex resume failed for thread $THREAD_ID" >&2
+        exit 3
+      fi
+    fi
+
+    CODEX_TOKENS="$(grep -o '"type":"turn.completed","usage":{[^}]*}' "$RAW_FILE" \
+      | grep -o '"input_tokens":[0-9]*\|"output_tokens":[0-9]*' \
+      | grep -o '[0-9]*' | awk '{sum+=$1} END{print sum+0}')"
+
+    CANDIDATE="$(extract_proposal "$VERDICT_FILE")"
+    if [ -z "$CANDIDATE" ]; then
+      echo "$CODEX_TOKENS" >> "$LOG_FILE"
+      TOTAL_SPENT=$((TOTAL_SPENT + CODEX_TOKENS))
+      OUTCOME="stalled — Codex produced no content to evaluate"
+      break
+    fi
+    printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
+    echo ""
+    echo "--- round $ROUND: Codex produced ---"
+    cat "$CANDIDATE_FILE"
+    echo ""
+
+    # 2. Claude evaluates, via a direct API call — read-only by nature, no tool access
+    CLAUDE_PROMPT_FILE="$STATE_DIR/${SLUG}-claude-prompt.txt"
+    {
+      echo "You are an adversarial reviewer. Be skeptical and specific — your job is to find what's"
+      echo "wrong, not to be agreeable."
+      echo ""
+      echo "Review brief and criteria:"
+      cat "$BRIEF"
+      echo ""
+      echo "Codex produced the following for this artifact:"
+      echo "$BEGIN_MARK"
+      cat "$CANDIDATE_FILE"
+      echo "$END_MARK"
+      echo ""
+      echo "Check it against the criteria above — verify claims against real logic where you can,"
+      echo "don't just eyeball it, watch for brittle or misleading elements. End your reply with"
+      echo "exactly one line: RESULT: PASS if it's sound, or RESULT: FAIL if there's a material"
+      echo "problem. If FAIL, give the specific objection in one or two sentences."
+    } > "$CLAUDE_PROMPT_FILE"
+
+    CLAUDE_OUT="$STATE_DIR/${SLUG}-claude-out.txt"
+    CLAUDE_USAGE="$STATE_DIR/${SLUG}-claude-usage.txt"
+    if ! bash "$SCRIPT_DIR/claude_call.sh" "$CLAUDE_PROMPT_FILE" "$CLAUDE_OUT" "$CLAUDE_USAGE"; then
+      echo "error: claude_call.sh failed — see message above" >&2
       exit 3
     fi
-  else
-    echo "== round $ROUND (resuming $THREAD_ID) =="
-    codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
-      -o "$VERDICT_FILE" \
-      "Re-check $ARTIFACT against the same brief and criteria. End with the same exact verdict format as before." \
-      < /dev/null 2>/dev/null > "$RAW_FILE"
-    if [ ! -s "$VERDICT_FILE" ]; then
-      echo "error: codex resume failed for thread $THREAD_ID" >&2
-      exit 3
+    CLAUDE_TOKENS="$(cat "$CLAUDE_USAGE" 2>/dev/null || echo 0)"
+
+    ROUND_TOKENS=$((CODEX_TOKENS + CLAUDE_TOKENS))
+    echo "$ROUND_TOKENS" >> "$LOG_FILE"
+    TOTAL_SPENT=$((TOTAL_SPENT + ROUND_TOKENS))
+
+    echo "--- round $ROUND: Claude's evaluation ---"
+    cat "$CLAUDE_OUT"
+    echo ""
+    echo "(round tokens: $ROUND_TOKENS [codex: $CODEX_TOKENS, claude: $CLAUDE_TOKENS], cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
+    echo ""
+
+    PASSED=0
+    grep -qE 'RESULT: PASS' "$CLAUDE_OUT" && PASSED=1
+    if [ "$PASSED" -eq 1 ]; then
+      OUTCOME="converged"
+      break
     fi
-  fi
 
-  ROUND_TOKENS="$(grep -o '"type":"turn.completed","usage":{[^}]*}' "$RAW_FILE" \
-    | grep -o '"input_tokens":[0-9]*\|"output_tokens":[0-9]*' \
-    | grep -o '[0-9]*' | awk '{sum+=$1} END{print sum+0}')"
-  echo "$ROUND_TOKENS" >> "$LOG_FILE"
-  TOTAL_SPENT=$((TOTAL_SPENT + ROUND_TOKENS))
+    CLAUDE_FEEDBACK="$(cat "$CLAUDE_OUT")"
 
-  echo ""
-  echo "--- round $ROUND critique ---"
-  cat "$VERDICT_FILE"
-  echo ""
-  echo "(round tokens: $ROUND_TOKENS, cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
-  echo ""
-
-  NEW_PROPOSAL="$(extract_proposal "$VERDICT_FILE")"
-  PASSED=0
-  grep -qE '(VERDICT: APPROVED|RESULT: PASS)' "$VERDICT_FILE" && PASSED=1
-
-  if [ "$PASSED" -eq 1 ]; then
-    OUTCOME="converged"
-    break
-  fi
-
-  if [ -z "$NEW_PROPOSAL" ]; then
-    OUTCOME="stalled — Codex flagged problems but proposed no fix to iterate on"
-    break
-  fi
-  CANDIDATE="$NEW_PROPOSAL"
-  printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
-
-  if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
-    OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
-    break
-  fi
-  if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
-    OUTCOME="round limit reached ($MAX_ROUNDS)"
-    break
-  fi
-  ROUND=$((ROUND + 1))
-done
+    if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
+      OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
+      break
+    fi
+    if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
+      OUTCOME="round limit reached ($MAX_ROUNDS)"
+      break
+    fi
+    ROUND=$((ROUND + 1))
+  done
+fi
 
 # -------------------------------------------------------------- result ----
 echo "======================================"
