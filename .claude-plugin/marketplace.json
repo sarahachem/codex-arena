@@ -1,0 +1,13 @@
+{
+  "name": "codex-arena",
+  "owner": {
+    "name": "Sarah Achem"
+  },
+  "plugins": [
+    {
+      "name": "codex-arena",
+      "source": "./",
+      "description": "Codex critiques (read-only), Claude/you decide what to act on, loop runs until approved or budget runs out. Ships /codex-arena, plus a standalone arena.sh script."
+    }
+  ]
+}
