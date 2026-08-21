@@ -116,7 +116,15 @@ grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' /tmp/codex-arena-roun
 
 Codex stays read-only here too — it's producing text (new content, a proposed diff), not writing to any file. Same `< /dev/null` and timeout requirements as every other call.
 
-**Claude critiques, live, in the conversation** — no API call, no script: read what Codex produced, verify concretely (check it against the real schema/contract/tests, don't just eyeball it), and decide, out loud, what's wrong. If something is genuinely wrong, say so with a specific reason.
+**Claude critiques, live, in the conversation** — no API call, no script: nothing gets "sent" to Claude the way the review prompt gets sent to Codex in Phase 2, since Claude is already the one reading the output directly in context. That's not a reason to critique loosely — run the same criteria from Setup step 2 against what Codex produced, explicitly, not vaguely:
+
+- **Verify against real sources, not just read-through.** If Codex claims something matches a schema/contract/test, actually check the real file — don't take the claim on faith.
+- **Check for redundancy** against what already exists in the artifact — a new case/section that duplicates existing coverage isn't a genuine addition.
+- **Check labels/tags/claims for accuracy**, not just structural validity — something can pass schema checks and still be mislabeled or misleading about what it tests.
+- **Watch for brittleness Codex itself would flag** in someone else's work — an overly strict match condition, a fragile assumption, anything that would fail Codex's own bar if the roles were reversed.
+- **Ground-truth correctness** — does the expected outcome actually follow from the real logic/contract, or just look plausible.
+
+If something fails one of these, say so with the specific reason (which check, why it fails) — not a vague "this seems off." If everything holds, say so explicitly too, don't skip straight to applying it.
 
 **If Claude pushes back** — resume the same thread with the specific objection, same mechanics as a normal resume round:
 
