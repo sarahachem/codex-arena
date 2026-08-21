@@ -59,7 +59,11 @@ Lock the result into a short spec (inline is usually enough; a `SPEC.md` only if
 
    State which defaults you're starting from in one line, then ask plainly — "anything else you want checked, or anything on that list that doesn't apply?" — a single open question, not a structured card. Fold the answer in before writing the brief; the table is a starting point, not a ceiling, and the user's word always overrides it. If the artifact doesn't match any row, there's no default to fall back on — ask directly what matters, still as an open question. If Phase 1 ran, fold in anything the user's plain-English description implied (e.g. if they said the dataset should stress edge cases, "edge-case coverage" becomes a review criterion, not just something hoped for at generation time).
 3. If `ARTIFACT` is large enough that a single Codex pass can't reasonably hold all of it (a big dataset), agree with the user on how to split it — fixed-size chunks, a stratified sample plus a separate scripted schema/dedup pass, etc. — before spending a round on it.
-4. Save the final criteria (defaults + spec-derived + user's additions/overrides) + pointer to `ARTIFACT` as a short brief file, and start a log file (`ARENA-LOG.md` unless the user names another) recording the round budget and the criteria in one line.
+4. Save the brief file. It must open with the reviewer's posture, not just criteria — a brief that's only a checklist reads as a request for approval, not a real review:
+
+   > You are an adversarial reviewer. Be skeptical and specific — your job is to find what's wrong, not to be agreeable.
+
+   Then the final criteria (defaults + spec-derived + user's additions/overrides) + pointer to `ARTIFACT`. Start a log file (`ARENA-LOG.md` unless the user names another) recording the round budget and the criteria in one line.
 
 ## Phase 2 — ARENA (the loop)
 

@@ -144,6 +144,9 @@ if [ "$INIT_MODE" -eq 1 ]; then
   {
     echo "# Arena Review: $ARTIFACT"
     echo ""
+    echo "You are an adversarial reviewer. Be skeptical and specific — your job is to find what's"
+    echo "wrong, not to be agreeable."
+    echo ""
     if [ -n "$DEFAULTS" ]; then
       echo "## Default checks ($GUESS_TYPE)"
       echo "$DEFAULTS"
