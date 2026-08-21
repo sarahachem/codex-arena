@@ -116,7 +116,7 @@ grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' /tmp/codex-arena-roun
 
 Codex stays read-only here too — it's producing text (new content, a proposed diff), not writing to any file. Same `< /dev/null` and timeout requirements as every other call.
 
-**Claude critiques, live, in the conversation** — no API call, no script: nothing gets "sent" to Claude the way the review prompt gets sent to Codex in Phase 2, since Claude is already the one reading the output directly in context. That's not a reason to critique loosely — run the same criteria from Setup step 2 against what Codex produced, explicitly, not vaguely:
+**Claude critiques, live, in the conversation** — no API call, no script: nothing gets "sent" to Claude the way the review prompt gets sent to Codex in Phase 2, since Claude is already the one reading the output directly in context. That's not a reason to critique loosely, or to skip the posture Phase 2's prompt puts on Codex: **be skeptical and specific — the job here is to find what's wrong, not to be agreeable.** Producing something is easy to be generous about, especially work from a capable model; approach it the same way Codex is instructed to approach Claude's plans — as an adversarial reviewer whose default is doubt, not a collaborator being polite. Then run the same criteria from Setup step 2 against what Codex produced, explicitly, not vaguely:
 
 - **Verify against real sources, not just read-through.** If Codex claims something matches a schema/contract/test, actually check the real file — don't take the claim on faith.
 - **Check for redundancy** against what already exists in the artifact — a new case/section that duplicates existing coverage isn't a genuine addition.
