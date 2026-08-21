@@ -33,7 +33,7 @@ Ask one plain question: what do you want done — generate something new, or rev
 If reviewing something existing → skip Phase 1, go to Setup.
 If generating something new → Phase 1.
 
-**State the direction explicitly, every time, before anything runs** — this is not implied by phase, the user shouldn't have to infer it: "Claude is orchestrating, Codex is the evaluator" (default — this is Phase 2) or "Codex is building, Claude is the evaluator" (only if the user asked for the reversed direction — Phase 2b). Say it in the same breath as the model/budget confirmation from "Before starting," not buried or assumed.
+**Ask who evaluates — this is the user's decision, not a default to infer.** Don't assume Phase 2's Claude-orchestrates/Codex-evaluates direction just because it's more common, and don't require the user to phrase a specific trigger word to get the other direction. Ask plainly: "who should evaluate — Codex, or Claude?" Take the answer, then state it back explicitly before round 1 runs, in the same breath as the model/budget confirmation from "Before starting": e.g. "Codex is the evaluator, Claude orchestrates" (→ Phase 2) or "Claude is the evaluator, Codex builds" (→ Phase 2b).
 
 ## Phase 1 — SPEC (only when the artifact doesn't exist yet)
 
