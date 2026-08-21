@@ -98,6 +98,41 @@ codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check
 4. If chunking: once a chunk clears, either start a fresh thread for the next chunk (cleanest — no confusion about which chunk a resumed session remembers) or keep resuming the same thread if the whole artifact is small enough that one session holding all of it makes sense. Decide which during setup, not mid-loop.
 5. If the round count would exceed `MAX_ROUNDS`, stop — go to Wrap-up as a round-limit stop.
 
+## Phase 2b — ARENA, reversed (Codex builds, Claude critiques)
+
+Everything above runs with Claude as the live orchestrator and Codex as the read-only critic. The user can ask for the roles swapped — Codex generates/builds, Claude is the one critiquing and deciding whether to concede or push back. Use this when the user says "codex builds, you review" or "run it the other way" or wants to see Codex produce something and Claude argue with it rather than the reverse.
+
+This direction is **conversational only** — it requires a live Claude session in the loop (there is no standalone-script equivalent: `arena.sh` has no counterpart credentials for reaching a Claude model unattended, and there is no local `claude` CLI to shell out to). If the user wants this fully unattended via a script, that needs a real `ANTHROPIC_API_KEY` wired through `claude_call.sh` — a separate, explicitly-opted-into path, not this one.
+
+**Round 1** — have Codex build/propose, same mechanics as the opening round above, but the prompt asks it to produce the artifact (or additions to it) rather than critique something that already exists:
+
+```bash
+codex exec -s read-only --skip-git-repo-check --json \
+  -o /tmp/codex-arena-build.txt \
+  "<what to build, grounded in the real codebase/schema — have Codex read the relevant files itself>" \
+  < /dev/null 2>/dev/null > /tmp/codex-arena-round.jsonl
+grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' /tmp/codex-arena-round.jsonl
+```
+
+Codex stays read-only here too — it's producing text (new content, a proposed diff), not writing to any file. Same `< /dev/null` and timeout requirements as every other call.
+
+**Claude critiques, live, in the conversation** — no API call, no script: read what Codex produced, verify concretely (check it against the real schema/contract/tests, don't just eyeball it), and decide, out loud, what's wrong. If something is genuinely wrong, say so with a specific reason.
+
+**If Claude pushes back** — resume the same thread with the specific objection, same mechanics as a normal resume round:
+
+```bash
+codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
+  -o /tmp/codex-arena-build.txt \
+  "<the specific objection, with reasoning — not a vague 'try again'>" \
+  < /dev/null 2>/dev/null > /tmp/codex-arena-round.jsonl
+```
+
+Codex may concede (revise) or defend its choice with a reason — either is a legitimate outcome. Claude is still the final arbiter: if Codex's defense doesn't hold up, keep pushing; if it does, accept it and say why. Log every round the same way as the forward direction — what Codex produced, what Claude objected to, what Codex did in response.
+
+Same budget as the forward direction, same enforcement — `MAX_ROUNDS`/`MAX_TOKENS` from the Budget section apply here too, not just to Phase 2. Track cumulative tokens the same way (from `turn.completed.usage` in the `--json` stream) and stop at whichever limit hits first, converged or not. Nothing about running this direction conversationally exempts it from the round cap — a live Claude session can keep pushing back just as indefinitely as an unattended script if nothing bounds it.
+
+**Before applying anything for real**, run it against whatever real validation exists (the project's own tests, a schema check, a dry parse) — don't just trust the conversation converged. A real check catching a problem (like a dataset size cap the conversation never considered) overrides an apparent verbal agreement between the two models.
+
 ## Wrap-up
 
 **Converged:** show the final artifact, a short summary of what actually changed across the rounds, the round count, and the token total. Get explicit confirmation from the user before treating it as final — a passing verdict from Codex isn't the same as the user's sign-off. Then hand off rather than assume: what "using" a hardened artifact means is different for every artifact type (run the eval, open a PR, implement the plan, publish the doc) and isn't this skill's job — ask the user what they want to do with it next instead of picking for them.
