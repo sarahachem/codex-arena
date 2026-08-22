@@ -20,7 +20,7 @@
 #     brief file, then runs the full conversation automatically unless
 #     --no-run is given.
 #
-#   arena.sh --artifact FILE --brief FILE [--max-rounds N] [--max-tokens N] [--resume THREAD_ID]
+#   arena.sh --artifact FILE --brief FILE [--max-rounds N] [--max-tokens N] [--resume THREAD_ID] [--require-approval]
 #     Runs the full conversation using an existing brief file.
 #
 #   --evaluator codex (default): Codex critiques an existing artifact. Who fixes
@@ -51,9 +51,20 @@
 #     of any Claude Code/Claude.ai subscription. Ask before assuming the user
 #     wants to set this up; it costs real money on its own account.
 #
+#   --require-approval: without it (the default), every candidate fix — no
+#     matter which model wrote it — propagates automatically to the next
+#     round/step, exactly as today. With it, the run pauses each time a fix
+#     candidate is finalized and shows a diff against the real file, asking
+#     [y/N] before that candidate goes any further (fed back to Codex as a
+#     hypothetical, or handed to the reversed loop's evaluator). Declining
+#     stops the run immediately — it does not loop back for a revised
+#     candidate. This makes the run interactive at those points; it's still
+#     "unattended" in the sense that nothing else about the loop changes.
+#
 # Exit codes: 0 = converged/approved, 1 = stopped without approval
-#             (round/token limit, or nothing left to propose), 2 = setup
-#             error, 3 = a codex or claude call failed.
+#             (round/token limit, human declined a round's candidate, or
+#             nothing left to propose), 2 = setup error, 3 = a codex or
+#             claude call failed.
 
 set -u
 
@@ -70,6 +81,7 @@ INIT_OUT=""
 NO_RUN=0
 EVALUATOR="codex"
 API_ARBITER=0
+REQUIRE_APPROVAL=0
 
 BEGIN_MARK="===BEGIN_PROPOSED_ARTIFACT==="
 END_MARK="===END_PROPOSED_ARTIFACT==="
@@ -78,6 +90,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --init) INIT_MODE=1; shift ;;
     --no-run) NO_RUN=1; shift ;;
+    --require-approval) REQUIRE_APPROVAL=1; shift ;;
     --api-arbiter)
       echo "error: --api-arbiter was removed — --evaluator codex now auto-detects an available Anthropic key (env var or cache) and uses it the same way; just omit the flag" >&2
       exit 2
@@ -479,6 +492,36 @@ last_line_is_arbiter_dispute() {
   awk 'NF{line=$0} END{exit !(line=="ARBITER: DISPUTE")}' "$1"
 }
 
+# When --require-approval is set, pause every time a fix candidate is
+# finalized for the round — regardless of which model wrote it (Codex
+# self-fixing, or Claude via the API-detected path) — and ask before it
+# propagates any further (fed back to Codex as a hypothetical next round, or
+# handed to the reversed loop's evaluator). A no here stops the run
+# immediately rather than continuing unsupervised; it does NOT loop back for
+# a revised candidate — that would need its own round, which the user hasn't
+# asked for here. Without the flag this is a silent no-op, matching today's
+# fully-automatic behavior exactly.
+require_round_approval() {
+  if [ "$REQUIRE_APPROVAL" -ne 1 ]; then
+    return 0
+  fi
+  echo "" >&2
+  echo "--- round $ROUND: candidate fix awaiting approval ---" >&2
+  if command -v diff >/dev/null 2>&1; then
+    diff -u "$ARTIFACT" "$CANDIDATE_FILE" >&2 || true
+  else
+    cat "$CANDIDATE_FILE" >&2
+    echo "" >&2
+  fi
+  echo "---" >&2
+  printf "Apply this fix and continue to the next round? [y/N]: " >&2
+  read -r ROUND_APPROVAL_ANSWER
+  case "$ROUND_APPROVAL_ANSWER" in
+    [yY]|[yY][eE][sS]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Extract the thread.started thread_id via proper JSON parsing (not a regex
 # that assumes exact field order/adjacency/formatting) — fails closed with no
 # output if the event is missing or malformed, same discipline as
@@ -854,6 +897,11 @@ version using the same $BEGIN_MARK / $END_MARK markers."
       printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
     fi
 
+    if ! require_round_approval; then
+      OUTCOME="stopped — human declined to approve round $ROUND's candidate fix"
+      break
+    fi
+
     if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
       OUTCOME="round limit reached ($MAX_ROUNDS)"
       break
@@ -930,6 +978,11 @@ $END_MARK"
     echo "--- round $ROUND: Codex produced ---"
     cat "$CANDIDATE_FILE"
     echo ""
+
+    if ! require_round_approval; then
+      OUTCOME="stopped — human declined to approve round $ROUND's candidate before evaluator review"
+      break
+    fi
 
     # 2. Claude evaluates, via a direct API call — no tool access, so anything it
     # needs to check a claim against has to be handed to it directly in the prompt.
@@ -1066,6 +1119,17 @@ else
 fi
 echo "---"
 echo ""
+
+# A round-approval decline already IS the user's answer — asking "apply now?"
+# again would ask the same question twice, undermining the explicit no. Show
+# the candidate for reference/audit only in that case, don't re-prompt.
+case "$OUTCOME" in
+  "stopped — human declined"*)
+    echo "not applied — you already declined this candidate above. Left at: $CANDIDATE_FILE"
+    exit 1
+    ;;
+esac
+
 printf "Apply the above to %s now? [y/N]: " "$ARTIFACT"
 read -r APPLY_ANSWER
 case "$APPLY_ANSWER" in
