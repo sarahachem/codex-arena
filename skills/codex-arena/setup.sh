@@ -20,7 +20,17 @@ say "== codex-arena setup =="
 say ""
 say "1. Codex CLI"
 if command -v codex >/dev/null 2>&1; then
-  ok "found: $(codex --version 2>&1)"
+  CODEX_VERSION_LINE="$(codex --version 2>&1)"
+  ok "found: $CODEX_VERSION_LINE"
+  CODEX_VERSION_NUM="$(printf '%s' "$CODEX_VERSION_LINE" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1)"
+  if [ -n "$CODEX_VERSION_NUM" ]; then
+    CV_MAJOR="${CODEX_VERSION_NUM%%.*}"
+    CV_REST="${CODEX_VERSION_NUM#*.}"
+    CV_MINOR="${CV_REST%%.*}"
+    if [ "$CV_MAJOR" -eq 0 ] 2>/dev/null && [ "$CV_MINOR" -lt 130 ] 2>/dev/null; then
+      warn "codex CLI is $CODEX_VERSION_NUM — versions below 0.130 have been reported to misbehave with --json/resume; consider 'npm install -g @openai/codex@latest'"
+    fi
+  fi
 else
   warn "not found"
   if command -v npm >/dev/null 2>&1; then

@@ -18,7 +18,7 @@ Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended 
 
 **Conversationally, with Claude Code.** Install the plugin, then say `/codex-arena` or ask Claude to review/generate something with it. Claude drives the loop, reads Codex's critiques, and can push back on findings it disagrees with, with the reason logged.
 
-**Standalone.** `arena.sh` runs the whole loop unattended, and either model can end up as the critic — the flag picks who, not whether the artifact is new or already exists (Codex reads/relays existing content either way). The rule is consistent everywhere: whichever model evaluates only ever judges — it never writes the accepted fix, that's the other model's job. By default (`--evaluator codex`, no key) Codex is the only model reachable at all in an unattended script, so it necessarily judges *and* fixes itself — there's no other model to hand the fix to for free. Add `--api-arbiter` to change that: Codex still critiques, but now only ever critiques — a paid Claude API call writes every accepted fix (independently, not just accepting Codex's own proposed one) or disputes the finding and sends it back to Codex to withdraw or defend. `--init` asks you for criteria in plain English at the start, and it stops once, at the end, to ask whether to actually write the result to disk (with a diff shown first). There's also `--evaluator claude`, which flips the roles entirely: Codex reads (or, for a new artifact, generates) the content and does the fixing, and Claude is the one evaluating it via the same direct, separately-billed Anthropic API call (needs its own `ANTHROPIC_API_KEY`, not a Claude Code/Claude.ai subscription) — `--api-arbiter` and `--evaluator claude` are mutually exclusive, since `--evaluator claude` already has Claude as the evaluator.
+**Standalone.** `arena.sh` runs the whole loop unattended, and either model can end up as the critic — the flag picks who, not whether the artifact is new or already exists (Codex reads/relays existing content either way). The rule is consistent everywhere: whichever model evaluates only ever judges — it never writes the accepted fix, that's the other model's job. By default (`--evaluator codex`) Codex critiques the artifact; who fixes it depends on whether an Anthropic API key is already available, checked silently at startup — no prompt, no billed action just from checking. No key found anywhere: Codex is the only model reachable at all in an unattended script, so it necessarily judges *and* fixes itself. A key found (env var, or cached from a prior `--evaluator claude` run): Codex only ever critiques from then on — a paid Claude API call writes every accepted fix (independently, not just accepting Codex's own proposed one) or disputes the finding and sends it back to Codex to withdraw or defend. This is fully automatic, not a flag — set up a key once via `--evaluator claude`'s interactive prompt and every subsequent `--evaluator codex` run picks it up on its own. `--init` asks you for criteria in plain English at the start, and it stops once, at the end, to ask whether to actually write the result to disk (with a diff shown first). There's also `--evaluator claude`, which flips the roles entirely: Codex reads (or, for a new artifact, generates) the content and does the fixing, and Claude is the one evaluating it via the same direct, separately-billed Anthropic API call (needs its own `ANTHROPIC_API_KEY`, not a Claude Code/Claude.ai subscription).
 
 ## Install
 
@@ -37,7 +37,7 @@ bash ~/.claude/skills/codex-arena/setup.sh
 
 - [Codex CLI](https://github.com/openai/codex) (`setup.sh` installs it via npm if missing)
 - A Codex/ChatGPT login (`codex login` — interactive, `setup.sh` will tell you if it's missing)
-- **Only if you use `arena.sh --evaluator claude` or `arena.sh --api-arbiter`**: a real `ANTHROPIC_API_KEY` from [console.anthropic.com](https://console.anthropic.com/settings/keys). This is a separate, billed API path — not covered by a Claude Code or Claude.ai subscription. `claude_auth.sh` prompts for it interactively the first time either mode runs and offers to cache it; nothing asks for it, and no cost is incurred, unless you actually use one of those two flags.
+- **Only if you use `arena.sh --evaluator claude`, or already have a key available for the default `--evaluator codex` to auto-detect**: a real `ANTHROPIC_API_KEY` from [console.anthropic.com](https://console.anthropic.com/settings/keys). This is a separate, billed API path — not covered by a Claude Code or Claude.ai subscription. `claude_auth.sh` prompts for it interactively only the first time `--evaluator claude` runs, and offers to cache it; nothing prompts for it otherwise, and no cost is incurred unless a key ends up available.
 
 ## Standalone usage
 
@@ -48,8 +48,11 @@ arena.sh --init --artifact path/to/your/file.json
 # Or supply a pre-written brief and run directly:
 arena.sh --artifact path/to/your/file.json --brief ARENA-BRIEF.md --max-rounds 3
 
-# Same, but Codex only judges — a paid Claude API call writes every accepted fix:
-arena.sh --artifact path/to/your/file.json --brief ARENA-BRIEF.md --api-arbiter
+# If an Anthropic API key is already available (env var, or cached from a
+# prior --evaluator claude run) this automatically has Codex only judge —
+# a paid Claude API call writes every accepted fix. No flag needed; it's
+# the same command as above, the behavior just depends on key availability:
+arena.sh --artifact path/to/your/file.json --brief ARENA-BRIEF.md
 ```
 
 See `skills/codex-arena/SKILL.md` for the full mechanics, safety rules (Codex never gets write access, ever), and the conversational flow Claude follows.

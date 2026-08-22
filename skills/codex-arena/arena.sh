@@ -20,10 +20,29 @@
 #     brief file, then runs the full conversation automatically unless
 #     --no-run is given.
 #
-#   arena.sh --artifact FILE --brief FILE [--max-rounds N] [--max-tokens N] [--resume THREAD_ID] [--api-arbiter]
+#   arena.sh --artifact FILE --brief FILE [--max-rounds N] [--max-tokens N] [--resume THREAD_ID]
 #     Runs the full conversation using an existing brief file.
 #
-#   --evaluator codex (default): Codex critiques an existing artifact, proposes fixes as text.
+#   --evaluator codex (default): Codex critiques an existing artifact. Who fixes
+#     it depends on whether an Anthropic API key is already available — checked
+#     silently, no prompt, no billed action just from checking:
+#       - No key found anywhere (env var, or the cache at
+#         ~/.claude/skills/codex-arena/.anthropic_key): Codex is the only model
+#         reachable in this unattended script, so it judges AND writes its own
+#         fix, self-reviewed round after round. This is the plain free default.
+#       - A key IS found: Codex becomes evaluator-only — it critiques but never
+#         writes the accepted fix. Claude (via that key, the same paid path
+#         --evaluator claude uses) either writes its own corrected version each
+#         round (Codex's own proposed fix is shown to Claude only as
+#         non-authoritative context) or disputes the finding, putting the
+#         specific objection back to Codex to withdraw or defend.
+#     The interactive "paste your key" setup (via claude_auth.sh) never runs
+#     from this path — only --evaluator claude below triggers that the first
+#     time. Once a key exists (env var, or cached from a prior --evaluator
+#     claude run), every subsequent --evaluator codex run picks it up
+#     automatically. Ask before assuming the user wants a key set up at all —
+#     it's a genuinely separate, billed API path, not part of any Claude
+#     Code/Claude.ai subscription.
 #   --evaluator claude: reversed — Codex BUILDS (via codex exec, still read-only,
 #     text-only), Claude EVALUATES via a direct Anthropic API call. Needs a real
 #     ANTHROPIC_API_KEY — prompted for interactively on first use (via
@@ -31,20 +50,6 @@
 #     if you opt in. This is a genuinely separate, billed API path — not part
 #     of any Claude Code/Claude.ai subscription. Ask before assuming the user
 #     wants to set this up; it costs real money on its own account.
-#
-#   --api-arbiter (only with --evaluator codex, the default): opt-in, needs a
-#     real ANTHROPIC_API_KEY (same paid path as --evaluator claude). Without
-#     it, Codex is the only model in the loop — it judges the artifact AND
-#     writes its own fix, self-reviewed round after round; there's no other
-#     model to hand the fix to without paying for API access. With it, Codex
-#     becomes evaluator-only (mirrors --evaluator claude in reverse — the
-#     evaluator judges, it never writes the accepted fix): each round Codex
-#     critiques, and Claude either writes its own corrected version (which may
-#     differ from what Codex proposed — Codex's own fix is shown to Claude as
-#     context, never used directly) or disputes the finding, putting the
-#     specific objection back to Codex to withdraw or defend (same contest
-#     mechanics the conversational skill uses). Same billing caveat as
-#     --evaluator claude — ask before assuming the user wants it on.
 #
 # Exit codes: 0 = converged/approved, 1 = stopped without approval
 #             (round/token limit, or nothing left to propose), 2 = setup
@@ -73,7 +78,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --init) INIT_MODE=1; shift ;;
     --no-run) NO_RUN=1; shift ;;
-    --api-arbiter) API_ARBITER=1; shift ;;
+    --api-arbiter)
+      echo "error: --api-arbiter was removed — --evaluator codex now auto-detects an available Anthropic key (env var or cache) and uses it the same way; just omit the flag" >&2
+      exit 2
+      ;;
     --out|--artifact|--brief|--resume|--max-rounds|--max-tokens|--evaluator)
       if [ $# -lt 2 ]; then
         echo "error: $1 requires a value" >&2
@@ -100,10 +108,6 @@ case "$EVALUATOR" in
   codex|claude) ;;
   *) echo "error: --evaluator must be 'codex' (default) or 'claude'" >&2; exit 2 ;;
 esac
-if [ "$API_ARBITER" -eq 1 ] && [ "$EVALUATOR" = "claude" ]; then
-  echo "error: --api-arbiter only applies to --evaluator codex (the default) — --evaluator claude already has Claude arbitrating, that's what it is" >&2
-  exit 2
-fi
 
 require_positive_int() {
   # Canonical decimal integer only (no leading zeros, no leading '+'), and
@@ -268,26 +272,65 @@ if ! command -v codex >/dev/null 2>&1; then
   echo "error: codex CLI not found — run setup.sh first" >&2
   exit 2
 fi
+# Soft version floor, not a hard block — 0.130 is the floor other Codex CLI
+# review tooling (Crucible/grill-me-codex) has documented as needed for
+# reliable --json/resume behavior; a warning rather than an error since we
+# haven't independently confirmed our own exact minimum.
+CODEX_VERSION_LINE="$(codex --version 2>&1)"
+CODEX_VERSION_NUM="$(printf '%s' "$CODEX_VERSION_LINE" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1)"
+if [ -n "$CODEX_VERSION_NUM" ]; then
+  CV_MAJOR="${CODEX_VERSION_NUM%%.*}"
+  CV_REST="${CODEX_VERSION_NUM#*.}"
+  CV_MINOR="${CV_REST%%.*}"
+  if [ "$CV_MAJOR" -eq 0 ] 2>/dev/null && [ "$CV_MINOR" -lt 130 ] 2>/dev/null; then
+    echo "warning: codex CLI is $CODEX_VERSION_NUM — versions below 0.130 have been reported to misbehave with --json/resume; consider 'npm install -g @openai/codex@latest' if this run acts up" >&2
+  fi
+fi
 
-if [ "$EVALUATOR" = "claude" ] || [ "$API_ARBITER" -eq 1 ]; then
+if [ "$EVALUATOR" = "claude" ]; then
   if [ ! -f "$SCRIPT_DIR/claude_auth.sh" ] || [ ! -f "$SCRIPT_DIR/claude_call.sh" ]; then
-    echo "error: --evaluator claude / --api-arbiter needs claude_auth.sh and claude_call.sh next to this script" >&2
+    echo "error: --evaluator claude needs claude_auth.sh and claude_call.sh next to this script" >&2
     exit 2
   fi
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/claude_auth.sh"
   if ! ensure_anthropic_key; then
-    echo "error: no Anthropic API key — can't run --evaluator claude or --api-arbiter without one" >&2
+    echo "error: no Anthropic API key — can't run --evaluator claude without one" >&2
     exit 2
   fi
-fi
-
-if [ "$EVALUATOR" = "claude" ]; then
   echo "evaluator: claude (Codex builds, Claude evaluates via direct API call)"
-elif [ "$API_ARBITER" -eq 1 ]; then
-  echo "evaluator: codex, with API arbiter (Codex only judges — a paid Claude API call writes every accepted fix, or disputes the finding back to Codex)"
 else
-  echo "evaluator: codex (Codex builds and evaluates itself, read-only every round — no arbiter)"
+  # --evaluator codex (default): auto-detect, don't prompt. A key already
+  # available (env var, or a previously cached/validated file — see
+  # claude_auth.sh) means Claude can act as evaluator-only's fixer for free
+  # (no new billed action triggered by this check itself); no key anywhere
+  # means Codex is the only model reachable and must judge and fix itself.
+  # Never prompts here — that would make a plain default run interactive,
+  # breaking unattended use; the interactive "paste your key" flow only ever
+  # runs the first time you explicitly use --evaluator claude.
+  if [ -f "$SCRIPT_DIR/claude_auth.sh" ] && [ -f "$SCRIPT_DIR/claude_call.sh" ]; then
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/claude_auth.sh"
+    # Structural check first (no network call) so the billing notice can be
+    # printed BEFORE the validation call below — which is itself a real, tiny
+    # billed Anthropic request. Disclosure has to happen ahead of that call,
+    # not after it.
+    if anthropic_key_structurally_available; then
+      echo "NOTE: an Anthropic API key appears to be available — if it validates, this run will make billed Anthropic API calls whenever Codex flags a problem (Codex only judges, Claude fixes). Not covered by any Claude Code/Claude.ai subscription. Ctrl-C now if that's not wanted; unset ANTHROPIC_ARENA_KEY or remove $ARENA_KEY_FILE to force free self-fix mode instead." >&2
+      # Loads AND validates in one non-interactive step — never falls through
+      # to `read` on an invalid key the way ensure_anthropic_key() would.
+      if try_load_anthropic_key_noninteractive; then
+        API_ARBITER=1
+      else
+        echo "NOTE: that key didn't validate — continuing in free self-fix mode instead." >&2
+      fi
+    fi
+  fi
+  if [ "$API_ARBITER" -eq 1 ]; then
+    echo "evaluator: codex, with Claude fixing (Anthropic API key validated — Codex only judges, Claude writes every accepted fix or disputes the finding back to Codex)"
+  else
+    echo "evaluator: codex (no Anthropic API key found — Codex judges and fixes itself, read-only every round)"
+  fi
 fi
 
 if [ -z "$STATE_DIR" ]; then
@@ -360,7 +403,7 @@ if [ -z "$THREAD_ID" ]; then
     echo "# Arena log: $ARTIFACT"
     echo ""
     echo "- evaluator: $EVALUATOR"
-    echo "- api-arbiter: $( [ "$API_ARBITER" -eq 1 ] && echo enabled || echo disabled )"
+    echo "- fixer: $( [ "$EVALUATOR" = "claude" ] && echo codex || { [ "$API_ARBITER" -eq 1 ] && echo "claude (API key found)" || echo "codex (no API key found)"; } )"
     echo "- budget: max $MAX_ROUNDS rounds, max $MAX_TOKENS tokens"
     echo "- started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo ""
@@ -657,9 +700,10 @@ version using the same $BEGIN_MARK / $END_MARK markers."
     if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
       OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
       # Codex's own proposal is only a valid candidate to offer when Codex is
-      # allowed to fix itself (no arbiter). With --api-arbiter, Codex's fix was
-      # never authorized — only Claude's would be, and Claude hasn't run yet
-      # this round, so there's genuinely no candidate to offer.
+      # allowed to fix itself (no key found, API_ARBITER=0). When a key was
+      # found (API_ARBITER=1), Codex's fix was never authorized — only
+      # Claude's would be, and Claude hasn't run yet this round, so there's
+      # genuinely no candidate to offer.
       if [ "$API_ARBITER" -eq 0 ]; then
         NEW_PROPOSAL="$(extract_proposal "$VERDICT_FILE")"
         [ -n "$NEW_PROPOSAL" ] && { CANDIDATE="$NEW_PROPOSAL"; printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"; }
@@ -686,10 +730,10 @@ version using the same $BEGIN_MARK / $END_MARK markers."
       OUTCOME="stalled — Codex flagged problems but proposed no fix to iterate on"
       break
     fi
-    # With --api-arbiter, Codex not proposing a fix isn't stalling — Codex is
-    # evaluator-only in this mode, so its own fix was never required. Claude
-    # constructs a correction from Codex's critique (and the real content)
-    # whether or not Codex happened to include one.
+    # When a key was found (API_ARBITER=1), Codex not proposing a fix isn't
+    # stalling — Codex is evaluator-only in this mode, so its own fix was
+    # never required. Claude constructs a correction from Codex's critique
+    # (and the real content) whether or not Codex happened to include one.
 
     if [ "$API_ARBITER" -eq 1 ]; then
       # Codex is the evaluator only in this mode — it judges but never writes the

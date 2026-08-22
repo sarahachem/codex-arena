@@ -30,6 +30,48 @@ _arena_validate_key() {
   [ "$resp" = "200" ]
 }
 
+# True if a key looks structurally available WITHOUT any network call — env
+# var set, or a cached file that's readable/owned/non-symlink/non-empty. This
+# exists so a caller can announce "about to use a paid key" BEFORE the
+# validation call in try_load_anthropic_key_noninteractive() below actually
+# runs — that validation call is itself a real (tiny) billed API request, so
+# disclosure has to happen ahead of it, not after.
+anthropic_key_structurally_available() {
+  if [ -n "${ANTHROPIC_ARENA_KEY:-}" ]; then
+    return 0
+  fi
+  if [ -f "$ARENA_KEY_FILE" ] && [ ! -L "$ARENA_KEY_FILE" ] && [ -O "$ARENA_KEY_FILE" ] && [ -r "$ARENA_KEY_FILE" ] && [ -s "$ARENA_KEY_FILE" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Loads a key from env or cache and, for a cached one, validates it — but
+# NEVER prompts and NEVER falls through to interactive setup on failure,
+# unlike ensure_anthropic_key(). Used to decide, before any round runs,
+# whether Codex-as-evaluator mode can hand fixing to Claude (a key already
+# exists AND works) or must self-fix (no usable key found) — a default,
+# unattended run must never block on `read` no matter what state the cache
+# is in. Sets ANTHROPIC_ARENA_KEY and returns 0 on success; returns 1 (no
+# output, no side effects) on any kind of failure — missing file, unreadable,
+# not owned, empty, or failing live validation.
+try_load_anthropic_key_noninteractive() {
+  if [ -n "${ANTHROPIC_ARENA_KEY:-}" ]; then
+    return 0
+  fi
+  if [ ! -f "$ARENA_KEY_FILE" ] || [ -L "$ARENA_KEY_FILE" ] || [ ! -O "$ARENA_KEY_FILE" ] || [ ! -r "$ARENA_KEY_FILE" ]; then
+    return 1
+  fi
+  local cached_key
+  cached_key="$(cat "$ARENA_KEY_FILE" 2>/dev/null)" || return 1
+  if [ -z "$cached_key" ] || ! _arena_validate_key "$cached_key"; then
+    return 1
+  fi
+  ANTHROPIC_ARENA_KEY="$cached_key"
+  export ANTHROPIC_ARENA_KEY
+  return 0
+}
+
 ensure_anthropic_key() {
   if [ -n "${ANTHROPIC_ARENA_KEY:-}" ]; then
     return 0
