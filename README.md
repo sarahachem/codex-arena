@@ -1,6 +1,8 @@
 # codex-arena
 
-A bounded adversarial review-and-revise loop between Claude Code and the OpenAI Codex CLI. Neither model ever writes to a file directly, in any mode — the closest either gets is proposing text that a human or Claude's own edit tools apply. The roles are configurable, not fixed: by default Codex critiques an artifact — a synthetic eval dataset, a plan, a diff, a config file — in a read-only sandbox, and Claude (either a live Claude Code session or, standalone, you) decides what to act on; reviewing live code with Claude Code attached, Claude implements the fix directly with its own edit tools instead of Codex proposing text. The roles can also be reversed — Codex builds or proposes an artifact, and Claude is the one critiquing it, live in conversation or via a separate Anthropic API call in standalone mode — see "Two ways to use it" below. The loop runs automatically, round after round, until the reviewer approves or a round/token budget runs out.
+A review loop between Claude Code and OpenAI's Codex CLI — one model critiques an artifact (a dataset, plan, diff, or config), the other decides what to fix, back and forth until it converges or a budget runs out. Neither model ever writes files directly.
+
+Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended via a script. You can pick which model reviews and which gets reviewed, and there's an optional mode where a second, paid Claude API call arbitrates when Codex and Claude disagree — instead of just taking one side's word for it.
 
 ## Two ways to use it
 
