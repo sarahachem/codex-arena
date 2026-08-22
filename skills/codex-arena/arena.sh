@@ -642,6 +642,7 @@ version using the same $BEGIN_MARK / $END_MARK markers."
       echo "critique:"
       echo '```'
       cat "$VERDICT_FILE"
+      echo ""
       echo '```'
       echo ""
     } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
@@ -692,6 +693,7 @@ version using the same $BEGIN_MARK / $END_MARK markers."
         echo "Codex's critique and proposed fix:"
         echo '```'
         cat "$VERDICT_FILE"
+        echo ""
         echo '```'
         echo ""
         echo "Check Codex's claim against the exact content shown above — don't just judge whether it sounds"
@@ -821,6 +823,7 @@ $END_MARK"
         echo "Codex returned no valid $BEGIN_MARK/$END_MARK block. Raw output:"
         echo '```'
         cat "$VERDICT_FILE"
+        echo ""
         echo '```'
         echo ""
       } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
@@ -832,7 +835,8 @@ $END_MARK"
     cat "$CANDIDATE_FILE"
     echo ""
 
-    # 2. Claude evaluates, via a direct API call — read-only by nature, no tool access
+    # 2. Claude evaluates, via a direct API call — no tool access, so anything it
+    # needs to check a claim against has to be handed to it directly in the prompt.
     {
       echo "You are an adversarial reviewer. Be skeptical and specific — your job is to find what's"
       echo "wrong, not to be agreeable."
@@ -840,15 +844,25 @@ $END_MARK"
       echo "Review brief and criteria:"
       cat "$BRIEF"
       echo ""
+      if [ -s "$ARTIFACT" ]; then
+        echo "Real content of $ARTIFACT as it stood before this round (ground truth — verify Codex's"
+        echo "output against this, don't just take Codex's framing of it on faith):"
+        echo '```'
+        cat "$ARTIFACT"
+        echo ""
+        echo '```'
+        echo ""
+      fi
       echo "Codex produced the following for this artifact:"
       echo "$BEGIN_MARK"
       cat "$CANDIDATE_FILE"
+      echo ""
       echo "$END_MARK"
       echo ""
-      echo "Check it against the criteria above — verify claims against real logic where you can,"
-      echo "don't just eyeball it, watch for brittle or misleading elements. End your reply with"
-      echo "exactly one line: RESULT: PASS if it's sound, or RESULT: FAIL if there's a material"
-      echo "problem. If FAIL, give the specific objection in one or two sentences."
+      echo "Check it against the criteria above — verify claims against the real content shown above"
+      echo "where there is any, don't just eyeball Codex's own framing, watch for brittle or misleading"
+      echo "elements. End your reply with exactly one line: RESULT: PASS if it's sound, or RESULT: FAIL"
+      echo "if there's a material problem. If FAIL, give the specific objection in one or two sentences."
     } > "$CLAUDE_PROMPT_FILE"
 
     if ! bash "$SCRIPT_DIR/claude_call.sh" "$CLAUDE_PROMPT_FILE" "$CLAUDE_OUT" "$CLAUDE_USAGE"; then
@@ -875,6 +889,7 @@ $END_MARK"
       echo "Codex produced:"
       echo '```'
       cat "$CANDIDATE_FILE"
+      echo ""
       echo '```'
       echo ""
       echo "Claude's evaluation:"
@@ -951,6 +966,7 @@ if command -v diff >/dev/null 2>&1; then
 else
   echo "--- full candidate content ---"
   cat "$CANDIDATE_FILE"
+  echo ""
 fi
 echo "---"
 echo ""
