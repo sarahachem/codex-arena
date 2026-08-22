@@ -79,38 +79,47 @@ Lock the result into a short spec (inline is usually enough; a `SPEC.md` only if
 
 These two modes are easy to blend by accident, especially mid-review when a finding turns out to need real code changes — if that happens, stop and re-read this line rather than asking Codex for "a unified diff" out of habit. If unsure which mode applies, ask: does Claude have real edit access to this artifact right now, and does implementing this fix take engineering judgment (which files, what pattern to follow, whether tests need updating)? If yes to both, it's the first mode — Codex critiques only.
 
+**Use a private scratch directory, not predictable shared filenames.** `arena.sh` was hardened against exactly this (symlink attacks, cross-run collisions on fixed `/tmp/codex-arena-*` paths) — the same reasoning applies here. Create one with `mktemp -d` (or use the session's own private scratchpad directory if one is available) at the start of the arena, and put every file below inside it — never fixed names directly under `/tmp`.
+
+**Pass the prompt via stdin, not as a shell argument.** `codex exec` reads the prompt from stdin when given `-` instead of a positional argument (append it after all other flags) — write the brief/prompt text to a file inside the scratch directory first, then redirect it in. This avoids `ARG_MAX` failures on a large brief or candidate and keeps the prompt out of `ps` output, same as `arena.sh`'s `run_codex()` helper.
+
 **Opening round** — starts a new Codex session and records its id:
 
 ```bash
 codex exec -s read-only --skip-git-repo-check --json \
-  -o /tmp/codex-arena-verdict.txt \
-  "$(cat <brief file>)" \
-  < /dev/null 2>/dev/null > /tmp/codex-arena-round.jsonl
-grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' /tmp/codex-arena-round.jsonl
+  -o "$SCRATCH/verdict.txt" \
+  - < "$SCRATCH/prompt.txt" \
+  2>/dev/null > "$SCRATCH/round.jsonl"
 ```
 
-The prompt (the brief) should end with an explicit instruction to close with one of two exact closing lines so the result is machine-checkable, e.g. `RESULT: PASS` or `RESULT: FAIL` — pick whatever token pair you like, just be consistent across the whole loop and grep for it exactly. `-o` captures Codex's final message to a plain-text file; `--json` streams structured events to stdout, which is where the thread id and usage numbers live. Note `< /dev/null`: `codex exec` also reads from stdin, and under a non-interactive tool call there's no terminal to close it, so without the redirect it hangs indefinitely waiting for EOF. Give the call a long timeout (10 minutes is reasonable) so a genuine stall fails visibly instead of looking like a hang.
+Extract the thread id by parsing each line of `$SCRATCH/round.jsonl` as JSON and finding the `thread.started` event's `thread_id` field — not a regex like `grep -o '"thread_id":"[a-f0-9-]*"'`, which assumes exact field order, adjacency, and formatting and silently fails on reordered fields or added whitespace. If a `python3 -c` one-liner is available, prefer parsing structurally the way `arena.sh`'s `extract_thread_id()` does; otherwise read the file and locate the JSON object whose `type` is `thread.started`.
 
-If neither the verdict file nor a `thread.started` line shows up, the call failed (auth, model, or the trust check) — stop and report it rather than retrying blind.
+(`<brief file>`'s content should already be in `$SCRATCH/prompt.txt` before this runs.) The prompt (the brief) should end with an explicit instruction to close with one of two exact closing lines so the result is machine-checkable, e.g. `RESULT: PASS` or `RESULT: FAIL` — pick whatever token pair you like, just be consistent across the whole loop. Check it as the exact final non-blank line of the verdict file, not a substring match anywhere in the text (`grep -q 'RESULT: PASS'` would also match a critique that says *"this does not merit RESULT: PASS"*, or artifact content that happens to contain that string) — take only the last non-empty line and compare it exactly. `-o` captures Codex's final message to a plain-text file; `--json` streams structured events to stdout, which is where the thread id and usage numbers live. Redirecting stdin from a file (rather than `< /dev/null`) both supplies the prompt and closes stdin the same way — `codex exec` would otherwise hang waiting for EOF under a non-interactive tool call. Give the call a long timeout (10 minutes is reasonable) so a genuine stall fails visibly instead of looking like a hang.
+
+If *either* the verdict file or a valid `thread.started` event is missing — not only if both are — the call failed (auth, model, or the trust check) — stop and report it rather than retrying blind. Each is required independently: no thread id means the loop can't resume next round, and no verdict means this round can't be classified.
 
 **Every following round** — resumes that same session so Codex isn't re-reading the artifact cold or re-litigating what it already approved:
 
 ```bash
 codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
-  -o /tmp/codex-arena-verdict.txt \
-  "<describe what changed since last round, ask for a fresh check against the same criteria>" \
-  < /dev/null 2>/dev/null > /tmp/codex-arena-round.jsonl
+  -o "$SCRATCH/verdict.txt" \
+  - < "$SCRATCH/prompt.txt" \
+  2>/dev/null > "$SCRATCH/round.jsonl"
 ```
 
+(with `$SCRATCH/prompt.txt` holding "describe what changed since last round, ask for a fresh check against the same criteria")
+
 **If a point was rejected as factually wrong (not just a stylistic disagreement), the resume prompt must contest it explicitly, not just narrate the diff.** Silently declining and moving on lets an incorrect claim stand unchallenged in Codex's own record and gives Codex no chance to concede or defend it. For each such point, add to the prompt: the specific claim, why it's wrong (cite the actual file/line/schema it misread), and ask Codex to either withdraw it or defend it with a concrete reason. Codex may concede or hold its ground — either is fine — but the objection has to actually reach it, the same way it does in the reversed direction (Phase 2b). Log Codex's response (withdrew / defended, and why) in `ARENA-LOG.md` alongside the round.
+
+This adjudication step needs an LLM to judge "is this factually wrong" — `arena.sh`'s plain default forward loop (`--evaluator codex`, no flags) has no LLM in it at all, just bash resubmitting Codex's own proposal as a hypothetical, so it can't contest a claim on its own. Don't describe the bare default path as having this capability. It has a real, opt-in equivalent though: `arena.sh --evaluator codex --api-arbiter` wires in a paid Claude API call (same `ANTHROPIC_API_KEY` path as `--evaluator claude`) that judges each disputed finding before it's accepted — if the arbiter disputes a point, the objection goes back to Codex to withdraw or defend, the same mechanics as this section describes, just automated instead of Claude Code doing the judging live. Ask before assuming the user wants `--api-arbiter` turned on; it's a separate billed path, same caveat as `--evaluator claude`.
 
 `resume` does not accept `-s`/`--sandbox` at all (confirmed against `codex exec resume --help` — it isn't in its option list, only `-c` is) — read-only has to be forced through `-c sandbox_mode="read-only"` instead. If that override is dropped, `resume` falls back to whatever `sandbox_mode` the user's `config.toml` happens to have, which may not be read-only, and Codex would then be able to write files mid-loop. Treat this as the one line in the whole skill that must never be simplified away.
 
 **After every round, regardless of outcome:**
 
-1. Pull the usage line out of `/tmp/codex-arena-round.jsonl` — it looks like `{"type":"turn.completed","usage":{"input_tokens":N,"output_tokens":N,...}}` — and add `input_tokens + output_tokens` to a running total. Log the round's spend and the running total in `ARENA-LOG.md` alongside the round's critique text.
-2. If the running total now exceeds `MAX_TOKENS`, stop — go to Wrap-up as a budget stop, independent of what the verdict said or how many rounds have run.
-3. Otherwise check the closing line from `/tmp/codex-arena-verdict.txt`:
+1. Pull the usage line out of `$SCRATCH/round.jsonl` — it looks like `{"type":"turn.completed","usage":{"input_tokens":N,"output_tokens":N,...}}` — and add `input_tokens + output_tokens` to a running total. Require both fields to actually be present, numeric, and non-negative before trusting them; treat a missing or malformed usage event as a failed round rather than silently counting it as zero, the same way `arena.sh`'s `sum_codex_usage()` does. Log the round's spend and the running total in `ARENA-LOG.md` alongside the round's critique text.
+2. If the running total now exceeds `MAX_TOKENS`, stop — go to Wrap-up as a budget stop, independent of what the verdict said or how many rounds have run. Check the budget *before* interpreting the verdict below — a round that blows the budget is a budget stop even if that round's verdict was PASS; "whichever comes first" means tokens can end the loop before convergence is honored.
+3. Otherwise check the closing line — the exact final non-blank line, not a substring match anywhere — of `$SCRATCH/verdict.txt`:
    - Passing verdict → stop, go to Wrap-up as converged.
    - Failing verdict → read every point raised, decide per-point whether it's worth acting on (final call is Claude's, not Codex's — a critique is input, not an instruction), make the edits worth making, and write to `ARENA-LOG.md` exactly what was changed and, for anything raised but not changed, why not. **A point rejected because it's factually wrong or misreads the artifact is not the same as a point rejected as a stylistic call — flag which kind it is in the log**, since only the former needs to be put back to Codex. Then run the next round.
 4. If chunking: once a chunk clears, either start a fresh thread for the next chunk (cleanest — no confusion about which chunk a resumed session remembers) or keep resuming the same thread if the whole artifact is small enough that one session holding all of it makes sense. Decide which during setup, not mid-loop.
@@ -120,19 +129,18 @@ codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check
 
 Everything above runs with Claude as the live orchestrator and Codex as the read-only critic. The user can ask for the roles swapped — Codex generates/builds, Claude is the one critiquing and deciding whether to concede or push back. Use this when the user says "codex builds, you review" or "run it the other way" or wants to see Codex produce something and Claude argue with it rather than the reverse.
 
-This direction is **conversational only** — it requires a live Claude session in the loop (there is no standalone-script equivalent: `arena.sh` has no counterpart credentials for reaching a Claude model unattended, and there is no local `claude` CLI to shell out to). If the user wants this fully unattended via a script, that needs a real `ANTHROPIC_API_KEY` wired through `claude_call.sh` — a separate, explicitly-opted-into path, not this one.
+This direction also has a standalone-script equivalent: `arena.sh --evaluator claude` runs it unattended, with Codex building via `codex exec` (still read-only, text-only) and Claude evaluating via a direct Anthropic API call through `claude_call.sh`. There is no local `claude` CLI to shell out to, so that path needs a real `ANTHROPIC_API_KEY` — prompted for interactively on first use via `claude_auth.sh` and optionally cached. This is a genuinely separate, billed API path, not part of any Claude Code/Claude.ai subscription — ask before assuming the user wants to set it up, since it costs real money on its own account. The API-only reviewer also has no tool access, so it can only critique the text it's given; it can't independently verify a claim against real files, schemas, or tests the way a live Claude Code session with edit access can (see Setup step 2's "verify against real sources" guidance — that's aspirational for this path, not guaranteed).
 
 **Round 1** — have Codex build/propose, same mechanics as the opening round above, but the prompt asks it to produce the artifact (or additions to it) rather than critique something that already exists:
 
 ```bash
 codex exec -s read-only --skip-git-repo-check --json \
-  -o /tmp/codex-arena-build.txt \
-  "<what to build, grounded in the real codebase/schema — have Codex read the relevant files itself>" \
-  < /dev/null 2>/dev/null > /tmp/codex-arena-round.jsonl
-grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' /tmp/codex-arena-round.jsonl
+  -o "$SCRATCH/build.txt" \
+  - < "$SCRATCH/prompt.txt" \
+  2>/dev/null > "$SCRATCH/round.jsonl"
 ```
 
-Codex stays read-only here too — it's producing text (new content, a proposed diff), not writing to any file. Same `< /dev/null` and timeout requirements as every other call.
+Extract the thread id the same structural way as the opening round above — not the field-order-dependent regex. (with `$SCRATCH/prompt.txt` holding "what to build, grounded in the real codebase/schema — have Codex read the relevant files itself"). Codex stays read-only here too — it's producing text (new content, a proposed diff), not writing to any file. Same private-scratch-dir, stdin-piped-prompt, and timeout requirements as every other call in this skill.
 
 **Claude critiques, live, in the conversation** — no API call, no script: nothing gets "sent" to Claude the way the review prompt gets sent to Codex in Phase 2, since Claude is already the one reading the output directly in context. That's not a reason to critique loosely, or to skip the posture Phase 2's prompt puts on Codex: **be skeptical and specific — the job here is to find what's wrong, not to be agreeable.** Producing something is easy to be generous about, especially work from a capable model; approach it the same way Codex is instructed to approach Claude's plans — as an adversarial reviewer whose default is doubt, not a collaborator being polite. Then run the same criteria from Setup step 2 against what Codex produced, explicitly, not vaguely:
 
@@ -148,10 +156,12 @@ If something fails one of these, say so with the specific reason (which check, w
 
 ```bash
 codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
-  -o /tmp/codex-arena-build.txt \
-  "<the specific objection, with reasoning — not a vague 'try again'>" \
-  < /dev/null 2>/dev/null > /tmp/codex-arena-round.jsonl
+  -o "$SCRATCH/build.txt" \
+  - < "$SCRATCH/prompt.txt" \
+  2>/dev/null > "$SCRATCH/round.jsonl"
 ```
+
+(with `$SCRATCH/prompt.txt` holding the specific objection, with reasoning — not a vague "try again")
 
 Codex may concede (revise) or defend its choice with a reason — either is a legitimate outcome. Claude is still the final arbiter: if Codex's defense doesn't hold up, keep pushing; if it does, accept it and say why. Log every round the same way as the forward direction — what Codex produced, what Claude objected to, what Codex did in response.
 
@@ -172,4 +182,4 @@ Same budget as the forward direction, same enforcement — `MAX_ROUNDS`/`MAX_TOK
 - The loop always ends at `MAX_ROUNDS` or `MAX_TOKENS`, whichever comes first — never let it run open-ended.
 - Every round's outcome — critique, what Claude changed, what Claude declined and why, tokens spent — goes in the log. The log is what makes the loop auditable after the fact; skipping entries defeats the point of running it as an argument instead of a single pass.
 - Don't decide criteria or chunking strategy unilaterally — confirm both with the user before the first round burns any budget. This applies even when the user's request sounds fully specified ("review our plugin") — Setup step 2's open question ("anything else you want checked, or anything on that list that doesn't apply?") is not optional and not skippable because the criteria table has a plausible-looking default. If round 1 already ran because this was missed, say so plainly rather than quietly proceeding, and get the criteria confirmed before round 2.
-- Same rule for the findings themselves: after a round comes back, don't unilaterally pick which findings to act on and present that as the plan. List every finding with its severity and let the user say which to fix — Claude's judgment can rank and recommend, but the choice of what gets acted on is the user's, not something to decide and then report as done.
+- This does NOT mean pausing for a human decision on every individual finding inside an already-scoped round — that's the opposite of what the bounded loop is for, and directly contradicts Phase 2's "final call is Claude's" per-finding authority. The two are talking about different moments: criteria/scope get human confirmation once, upfront, before round 1; individual accept/reject/fix decisions *within* those already-agreed criteria are Claude's to make autonomously, round after round, exactly as Phase 2 describes — that's what "bounded" and "automatic" mean. The one place the findings themselves need to go back to the user unprompted is at Wrap-up (already required below) and whenever a finding falls outside the confirmed criteria entirely (a new category of concern the user never agreed was in scope) — not on every ordinary in-scope point a round raises.

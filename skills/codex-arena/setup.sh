@@ -22,14 +22,24 @@ say "1. Codex CLI"
 if command -v codex >/dev/null 2>&1; then
   ok "found: $(codex --version 2>&1)"
 else
-  warn "not found — installing via npm (npm install -g @openai/codex)"
+  warn "not found"
   if command -v npm >/dev/null 2>&1; then
-    if npm install -g @openai/codex; then
-      ok "installed: $(codex --version 2>&1)"
-    else
-      warn "npm install failed — install codex manually, then re-run this script"
-      FAIL=1
-    fi
+    printf "  install it now via a global npm install (npm install -g @openai/codex)? [y/N]: "
+    read -r INSTALL_ANSWER
+    case "$INSTALL_ANSWER" in
+      [yY]|[yY][eE][sS])
+        if npm install -g @openai/codex; then
+          ok "installed: $(codex --version 2>&1)"
+        else
+          warn "npm install failed — install codex manually, then re-run this script"
+          FAIL=1
+        fi
+        ;;
+      *)
+        warn "skipped — install it yourself with: npm install -g @openai/codex"
+        FAIL=1
+        ;;
+    esac
   else
     warn "npm not found — install Node/npm first, then re-run this script"
     FAIL=1

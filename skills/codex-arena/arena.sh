@@ -20,10 +20,10 @@
 #     brief file, then runs the full conversation automatically unless
 #     --no-run is given.
 #
-#   arena.sh --artifact FILE --brief FILE [--max-rounds N] [--max-tokens N] [--resume THREAD_ID]
+#   arena.sh --artifact FILE --brief FILE [--max-rounds N] [--max-tokens N] [--resume THREAD_ID] [--api-arbiter]
 #     Runs the full conversation using an existing brief file.
 #
-#   --evaluator codex (default): Codex critiques itself, proposes fixes as text.
+#   --evaluator codex (default): Codex critiques an existing artifact, proposes fixes as text.
 #   --evaluator claude: reversed — Codex BUILDS (via codex exec, still read-only,
 #     text-only), Claude EVALUATES via a direct Anthropic API call. Needs a real
 #     ANTHROPIC_API_KEY — prompted for interactively on first use (via
@@ -31,6 +31,17 @@
 #     if you opt in. This is a genuinely separate, billed API path — not part
 #     of any Claude Code/Claude.ai subscription. Ask before assuming the user
 #     wants to set this up; it costs real money on its own account.
+#
+#   --api-arbiter (only with --evaluator codex, the default): opt-in. Without
+#     it, a Codex finding is always taken at face value — accepted and carried
+#     into the next round unquestioned, exactly as if no arbiter existed. With
+#     it, each round Codex flags a problem, a real Claude (via the same paid
+#     ANTHROPIC_API_KEY path as --evaluator claude) is asked to judge whether
+#     the finding actually holds up before it's accepted; if Claude disputes
+#     it, the specific objection is put back to Codex to withdraw or defend
+#     (same contest mechanics the conversational skill uses), rather than
+#     blindly folding an unexamined finding into the candidate. Same billing
+#     caveat as --evaluator claude — ask before assuming the user wants it on.
 #
 # Exit codes: 0 = converged/approved, 1 = stopped without approval
 #             (round/token limit, or nothing left to propose), 2 = setup
@@ -44,12 +55,13 @@ ARTIFACT=""
 BRIEF=""
 THREAD_ID=""
 MAX_TOKENS=250000
-MAX_ROUNDS=5
+MAX_ROUNDS=3
 STATE_DIR="${CODEX_ARENA_STATE_DIR:-}"
 INIT_MODE=0
 INIT_OUT=""
 NO_RUN=0
 EVALUATOR="codex"
+API_ARBITER=0
 
 BEGIN_MARK="===BEGIN_PROPOSED_ARTIFACT==="
 END_MARK="===END_PROPOSED_ARTIFACT==="
@@ -58,6 +70,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --init) INIT_MODE=1; shift ;;
     --no-run) NO_RUN=1; shift ;;
+    --api-arbiter) API_ARBITER=1; shift ;;
     --out|--artifact|--brief|--resume|--max-rounds|--max-tokens|--evaluator)
       if [ $# -lt 2 ]; then
         echo "error: $1 requires a value" >&2
@@ -84,6 +97,10 @@ case "$EVALUATOR" in
   codex|claude) ;;
   *) echo "error: --evaluator must be 'codex' (default) or 'claude'" >&2; exit 2 ;;
 esac
+if [ "$API_ARBITER" -eq 1 ] && [ "$EVALUATOR" = "claude" ]; then
+  echo "error: --api-arbiter only applies to --evaluator codex (the default) — --evaluator claude already has Claude arbitrating, that's what it is" >&2
+  exit 2
+fi
 
 require_positive_int() {
   # Canonical decimal integer only (no leading zeros, no leading '+'), and
@@ -168,8 +185,11 @@ if [ "$INIT_MODE" -eq 1 ]; then
     echo "Default checks for $GUESS_TYPE:"
     echo "$DEFAULTS"
     echo ""
-    echo "Type anything to add, drop, or override — or just press enter on an empty"
-    echo "first line to use the defaults above as-is. Finish with an empty line."
+    echo "Type anything to add or override — your text is appended below the defaults and told"
+    echo "to take priority if it conflicts with one (e.g. \"don't flag X\" overrides a default that"
+    echo "would). The defaults themselves are never deleted from the brief, only outweighed. Or"
+    echo "just press enter on an empty first line to use the defaults above as-is. Finish with an"
+    echo "empty line."
   else
     echo "In plain English: what should this be checked against? What counts as wrong?"
     echo "(one or more lines; finish with an empty line)"
@@ -246,20 +266,26 @@ if ! command -v codex >/dev/null 2>&1; then
   exit 2
 fi
 
-if [ "$EVALUATOR" = "claude" ]; then
+if [ "$EVALUATOR" = "claude" ] || [ "$API_ARBITER" -eq 1 ]; then
   if [ ! -f "$SCRIPT_DIR/claude_auth.sh" ] || [ ! -f "$SCRIPT_DIR/claude_call.sh" ]; then
-    echo "error: --evaluator claude needs claude_auth.sh and claude_call.sh next to this script" >&2
+    echo "error: --evaluator claude / --api-arbiter needs claude_auth.sh and claude_call.sh next to this script" >&2
     exit 2
   fi
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/claude_auth.sh"
   if ! ensure_anthropic_key; then
-    echo "error: no Anthropic API key — can't run --evaluator claude without one" >&2
+    echo "error: no Anthropic API key — can't run --evaluator claude or --api-arbiter without one" >&2
     exit 2
   fi
 fi
 
-echo "evaluator: $EVALUATOR $( [ "$EVALUATOR" = "claude" ] && echo "(Codex builds, Claude evaluates via direct API call)" || echo "(Codex builds and evaluates itself, read-only every round)" )"
+if [ "$EVALUATOR" = "claude" ]; then
+  echo "evaluator: claude (Codex builds, Claude evaluates via direct API call)"
+elif [ "$API_ARBITER" -eq 1 ]; then
+  echo "evaluator: codex, with API arbiter (Codex critiques, a paid Claude API call judges disputed findings before they're accepted)"
+else
+  echo "evaluator: codex (Codex builds and evaluates itself, read-only every round — no arbiter)"
+fi
 
 if [ -z "$STATE_DIR" ]; then
   # No explicit state dir: make a private, unpredictable one per run. A resumed
@@ -298,6 +324,10 @@ CANDIDATE_FILE="$STATE_DIR/${SLUG}-candidate.txt"
 CLAUDE_PROMPT_FILE="$STATE_DIR/${SLUG}-claude-prompt.txt"
 CLAUDE_OUT="$STATE_DIR/${SLUG}-claude-out.txt"
 CLAUDE_USAGE="$STATE_DIR/${SLUG}-claude-usage.txt"
+# Full round-by-round record (verdict text, tokens, outcome) — LOG_FILE above
+# is numbers-only and exists for the running-total calc; this is the actual
+# auditable trail, since VERDICT_FILE itself gets overwritten every round.
+AUDIT_LOG_FILE="$(dirname "$ARTIFACT")/$(basename "$ARTIFACT").arena-log.md"
 
 # A pre-existing STATE_DIR (via CODEX_ARENA_STATE_DIR) is now verified to be a
 # real, owned directory, but files already inside it could still be symlinks
@@ -306,22 +336,74 @@ CLAUDE_USAGE="$STATE_DIR/${SLUG}-claude-usage.txt"
 # reuses LOG_FILE across invocations, so this only rejects things that are NOT
 # a plain regular file owned by the current user (a legitimate prior run's
 # output passes; a symlink, device file, or someone else's file does not).
-for f in "$VERDICT_FILE" "$RAW_FILE" "$LOG_FILE" "$CANDIDATE_FILE" "$CLAUDE_PROMPT_FILE" "$CLAUDE_OUT" "$CLAUDE_USAGE"; do
+for f in "$VERDICT_FILE" "$RAW_FILE" "$LOG_FILE" "$CANDIDATE_FILE" "$CLAUDE_PROMPT_FILE" "$CLAUDE_OUT" "$CLAUDE_USAGE" "$AUDIT_LOG_FILE"; do
   if [ -L "$f" ]; then
-    echo "error: $f already exists as a symlink (possibly dangling), refusing to use this state dir" >&2
+    echo "error: $f already exists as a symlink (possibly dangling), refusing to use it" >&2
     exit 2
   fi
   if [ -e "$f" ] && { [ ! -f "$f" ] || [ ! -O "$f" ]; }; then
-    echo "error: $f already exists and isn't a plain file you own, refusing to use this state dir" >&2
+    echo "error: $f already exists and isn't a plain file you own, refusing to use it" >&2
     exit 2
   fi
 done
 
-# reset per-invocation token log unless resuming a prior thread
+# reset per-invocation logs unless resuming a prior thread
 if [ -z "$THREAD_ID" ]; then
-  : > "$LOG_FILE"
+  : > "$LOG_FILE" || {
+    echo "error: failed to write token log at $LOG_FILE" >&2
+    exit 2
+  }
+  {
+    echo "# Arena log: $ARTIFACT"
+    echo ""
+    echo "- evaluator: $EVALUATOR"
+    echo "- api-arbiter: $( [ "$API_ARBITER" -eq 1 ] && echo enabled || echo disabled )"
+    echo "- budget: max $MAX_ROUNDS rounds, max $MAX_TOKENS tokens"
+    echo "- started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo ""
+  } > "$AUDIT_LOG_FILE" || {
+    echo "error: failed to create audit log at $AUDIT_LOG_FILE — refusing to run without it" >&2
+    exit 2
+  }
 fi
+# A --resume run reuses the prior audit log, but if it's missing (state dir
+# wiped, first-time resume into a fresh dir, etc.) there'd be nothing for the
+# EXIT trap below to write to — make sure the file exists either way before
+# the trap is installed.
+if [ ! -e "$AUDIT_LOG_FILE" ]; then
+  : > "$AUDIT_LOG_FILE" || {
+    echo "error: failed to create audit log at $AUDIT_LOG_FILE — refusing to run without it" >&2
+    exit 2
+  }
+fi
+# An existing file can be present, owned, and a regular file, yet still not
+# writable (permissions changed since last run) — a checked no-op append
+# proves write access up front, the same way missing-file creation does.
+: >> "$AUDIT_LOG_FILE" || {
+  echo "error: audit log at $AUDIT_LOG_FILE exists but isn't writable — refusing to run without it" >&2
+  exit 2
+}
 rm -f "$CANDIDATE_FILE"
+
+# Every exit path from here on — success, budget/round stop, or a hard
+# `exit 3` failure mid-round — must leave a record. The normal Wrap-up path
+# sets AUDIT_FINALIZED=1 after writing its own "## Outcome" section; this
+# trap only fires the fallback note when that never happened (an error exit
+# that bypassed the summary), so failures aren't silently missing from the log.
+AUDIT_FINALIZED=0
+audit_finalize_on_exit() {
+  local code=$?
+  if [ "$AUDIT_FINALIZED" -eq 0 ] && [ -w "$AUDIT_LOG_FILE" ]; then
+    {
+      echo "## Run ended abnormally"
+      echo ""
+      echo "- exit code: $code"
+      echo "- ended: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "- last round reached: ${ROUND:-unknown}"
+    } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
+  fi
+}
+trap audit_finalize_on_exit EXIT
 
 TOTAL_SPENT=0
 if [ -f "$LOG_FILE" ]; then
@@ -343,30 +425,173 @@ last_line_is_pass() {
   awk 'NF{line=$0} END{exit !(line=="RESULT: PASS" || line=="VERDICT: APPROVED")}' "$1"
 }
 
+last_line_is_arbiter_agree() {
+  awk 'NF{line=$0} END{exit !(line=="ARBITER: AGREE")}' "$1"
+}
+
+last_line_is_arbiter_dispute() {
+  awk 'NF{line=$0} END{exit !(line=="ARBITER: DISPUTE")}' "$1"
+}
+
+# Extract the thread.started thread_id via proper JSON parsing (not a regex
+# that assumes exact field order/adjacency/formatting) — fails closed with no
+# output if the event is missing or malformed, same discipline as
+# sum_codex_usage() below.
+extract_thread_id() {
+  python3 -c '
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        continue
+    if ev.get("type") == "thread.started":
+        tid = ev.get("thread_id")
+        if isinstance(tid, str) and tid:
+            print(tid)
+            sys.exit(0)
+sys.exit(1)
+' < "$1"
+}
+
+# Sum input_tokens+output_tokens from every turn.completed event in a codex
+# --json stream. Uses python3's json module (already a hard dependency via
+# claude_call.sh) instead of grep/awk field-order assumptions, and fails
+# closed — malformed/absent usage is an error, not a silent zero.
+sum_codex_usage() {
+  python3 -c '
+import json, sys
+
+def require_int(usage, key):
+    if key not in usage:
+        raise ValueError(f"usage missing required field {key!r}")
+    val = usage[key]
+    if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+        raise ValueError(f"usage field {key!r} is not a nonnegative integer: {val!r}")
+    return val
+
+total = 0
+found = False
+for lineno, line in enumerate(sys.stdin, 1):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        ev = json.loads(line)
+    except ValueError as e:
+        print(f"error: malformed JSON on line {lineno} of codex output: {e}", file=sys.stderr)
+        sys.exit(1)
+    if ev.get("type") == "turn.completed":
+        usage = ev.get("usage")
+        if not isinstance(usage, dict):
+            print(f"error: turn.completed on line {lineno} has no usage object", file=sys.stderr)
+            sys.exit(1)
+        try:
+            total += require_int(usage, "input_tokens") + require_int(usage, "output_tokens")
+        except ValueError as e:
+            print(f"error: line {lineno}: {e}", file=sys.stderr)
+            sys.exit(1)
+        found = True
+if not found:
+    print("error: no turn.completed usage event found in codex output", file=sys.stderr)
+    sys.exit(1)
+print(total)
+' < "$1"
+}
+
+CODEX_TIMEOUT_SECONDS=600
+
+# Runs `codex exec [resume THREAD_ID] ... -` with PROMPT_TEXT piped via a
+# private temp file on stdin, instead of embedding it as a shell argument —
+# avoids ARG_MAX on large artifacts/candidates and avoids the prompt ever
+# appearing in `ps` output. Caller sets PROMPT_TEXT and CODEX_ARGS (array)
+# before calling; result status is in CODEX_STATUS. Bounded by
+# CODEX_TIMEOUT_SECONDS so a genuine stall fails visibly instead of hanging
+# indefinitely — macOS has no `timeout`/`gtimeout` by default, so this is
+# done by hand: background the call, poll, kill it if it outlives the budget.
+run_codex() {
+  local prompt_file
+  prompt_file="$(mktemp "${STATE_DIR}/prompt.XXXXXXXXXX")" || {
+    echo "error: mktemp failed for prompt temp file" >&2
+    exit 3
+  }
+  printf '%s' "$PROMPT_TEXT" > "$prompt_file"
+
+  codex exec "${CODEX_ARGS[@]}" - \
+    < "$prompt_file" 2>/dev/null > "$RAW_FILE" &
+  local codex_pid=$!
+  local waited=0
+  while kill -0 "$codex_pid" 2>/dev/null; do
+    if [ "$waited" -ge "$CODEX_TIMEOUT_SECONDS" ]; then
+      echo "error: codex exec exceeded ${CODEX_TIMEOUT_SECONDS}s, killing it" >&2
+      kill -TERM "$codex_pid" 2>/dev/null
+      sleep 2
+      kill -KILL "$codex_pid" 2>/dev/null
+      wait "$codex_pid" 2>/dev/null
+      CODEX_STATUS=124
+      rm -f "$prompt_file"
+      return
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$codex_pid"
+  CODEX_STATUS=$?
+  rm -f "$prompt_file"
+}
+
 # ---------------------------------------------------------- round loop ----
 ROUND=1
 CANDIDATE=""
 OUTCOME=""
+PENDING_OBJECTION=""
+# Tracks whatever content Codex is actually reviewing THIS round — the real
+# artifact on the opening round, the hypothetical candidate afterward — so
+# the API arbiter (if enabled) judges Codex's finding against the same thing
+# Codex was looking at, not always the unchanged file on disk.
+REVIEWED_CONTENT=""
 
 if [ "$EVALUATOR" = "codex" ]; then
   while true; do
     rm -f "$VERDICT_FILE" "$RAW_FILE"
     if [ -z "$THREAD_ID" ]; then
       echo "== round $ROUND (new session) =="
-      codex exec -s read-only --skip-git-repo-check --json \
-        -o "$VERDICT_FILE" \
-        "$(cat "$BRIEF")" \
-        < /dev/null 2>/dev/null > "$RAW_FILE"
-      CODEX_STATUS=$?
-      NEW_THREAD="$(grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' "$RAW_FILE" | grep -o '[a-f0-9-]\{36\}')"
+      PROMPT_TEXT="$(cat "$BRIEF")"
+      REVIEWED_CONTENT="$(cat "$ARTIFACT")"
+      CODEX_ARGS=(-s read-only --skip-git-repo-check --json -o "$VERDICT_FILE")
+      run_codex
+      NEW_THREAD="$(extract_thread_id "$RAW_FILE")"
       if [ "$CODEX_STATUS" -ne 0 ] || [ -z "$NEW_THREAD" ] || [ ! -s "$VERDICT_FILE" ]; then
         echo "error: codex call failed (exit $CODEX_STATUS) — check auth (codex login status) and model config" >&2
         exit 3
       fi
       THREAD_ID="$NEW_THREAD"
+    elif [ -n "$PENDING_OBJECTION" ]; then
+      echo "== round $ROUND (resuming $THREAD_ID — putting the API arbiter's objection to Codex) =="
+      PROMPT_TEXT="The API arbiter reviewed your last finding and disputed it:
+
+$PENDING_OBJECTION
+
+Either withdraw the disputed point (say so explicitly) or defend it with a concrete reason grounded
+in the same content you just reviewed in your last message in this thread — whichever that was (the
+real file, or the hypothetical candidate you were re-checking) — don't switch to re-reading the
+on-disk file if you were actually reviewing a candidate, and don't just restate the original finding.
+Then give a fresh verdict against the full brief and criteria, in the same format as before, including
+a corrected-version proposal if problems (including any you're still defending) remain."
+      CODEX_ARGS=(resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json -o "$VERDICT_FILE")
+      run_codex
+      PENDING_OBJECTION=""
+      if [ "$CODEX_STATUS" -ne 0 ] || [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex resume failed for thread $THREAD_ID (exit $CODEX_STATUS)" >&2
+        exit 3
+      fi
     elif [ -n "$CANDIDATE" ]; then
       echo "== round $ROUND (resuming $THREAD_ID — reviewing proposed fix as a hypothetical) =="
-      RESUME_PROMPT="Here is a candidate revision incorporating the fix you proposed. This has NOT been
+      REVIEWED_CONTENT="$CANDIDATE"
+      PROMPT_TEXT="Here is a candidate revision incorporating the fix you proposed. This has NOT been
 written to the real file — it is purely hypothetical, for you to re-review as if it replaced
 $ARTIFACT. Check it against the same brief and criteria as before.
 
@@ -377,31 +602,28 @@ $END_MARK
 If this fully resolves everything, respond with the same PASS verdict format as before and
 omit the proposal block. If problems remain, describe them and propose an updated corrected
 version using the same $BEGIN_MARK / $END_MARK markers."
-      codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
-        -o "$VERDICT_FILE" \
-        "$RESUME_PROMPT" \
-        < /dev/null 2>/dev/null > "$RAW_FILE"
-      CODEX_STATUS=$?
+      CODEX_ARGS=(resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json -o "$VERDICT_FILE")
+      run_codex
       if [ "$CODEX_STATUS" -ne 0 ] || [ ! -s "$VERDICT_FILE" ]; then
         echo "error: codex resume failed for thread $THREAD_ID (exit $CODEX_STATUS)" >&2
         exit 3
       fi
     else
       echo "== round $ROUND (resuming $THREAD_ID) =="
-      codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
-        -o "$VERDICT_FILE" \
-        "Re-check $ARTIFACT against the same brief and criteria. End with the same exact verdict format as before." \
-        < /dev/null 2>/dev/null > "$RAW_FILE"
-      CODEX_STATUS=$?
+      REVIEWED_CONTENT="$(cat "$ARTIFACT")"
+      PROMPT_TEXT="Re-check $ARTIFACT against the same brief and criteria. End with the same exact verdict format as before."
+      CODEX_ARGS=(resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json -o "$VERDICT_FILE")
+      run_codex
       if [ "$CODEX_STATUS" -ne 0 ] || [ ! -s "$VERDICT_FILE" ]; then
         echo "error: codex resume failed for thread $THREAD_ID (exit $CODEX_STATUS)" >&2
         exit 3
       fi
     fi
 
-    ROUND_TOKENS="$(grep -o '"type":"turn.completed","usage":{[^}]*}' "$RAW_FILE" \
-      | grep -o '"input_tokens":[0-9]*\|"output_tokens":[0-9]*' \
-      | grep -o '[0-9]*' | awk '{sum+=$1} END{print sum+0}')"
+    if ! ROUND_TOKENS="$(sum_codex_usage "$RAW_FILE")"; then
+      echo "error: couldn't determine round token usage from codex output — treating as a failed call" >&2
+      exit 3
+    fi
     echo "$ROUND_TOKENS" >> "$LOG_FILE"
     TOTAL_SPENT=$((TOTAL_SPENT + ROUND_TOKENS))
 
@@ -411,6 +633,29 @@ version using the same $BEGIN_MARK / $END_MARK markers."
     echo ""
     echo "(round tokens: $ROUND_TOKENS, cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
     echo ""
+
+    {
+      echo "## Round $ROUND"
+      echo ""
+      echo "- tokens: $ROUND_TOKENS (cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
+      echo ""
+      echo "critique:"
+      echo '```'
+      cat "$VERDICT_FILE"
+      echo '```'
+      echo ""
+    } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
+
+    # Budget is checked before the verdict: a round that blows the budget is
+    # reported as a budget stop even if Codex's verdict in that same round
+    # was PASS — "whichever comes first" means tokens can end the loop before
+    # convergence is honored.
+    if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
+      OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
+      NEW_PROPOSAL="$(extract_proposal "$VERDICT_FILE")"
+      [ -n "$NEW_PROPOSAL" ] && { CANDIDATE="$NEW_PROPOSAL"; printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"; }
+      break
+    fi
 
     NEW_PROPOSAL="$(extract_proposal "$VERDICT_FILE")"
     PASSED=0
@@ -425,13 +670,92 @@ version using the same $BEGIN_MARK / $END_MARK markers."
       OUTCOME="stalled — Codex flagged problems but proposed no fix to iterate on"
       break
     fi
+
+    if [ "$API_ARBITER" -eq 1 ]; then
+      {
+        echo "You are an impartial arbiter, not an advocate for either side. Codex reviewed an artifact"
+        echo "against the brief and criteria below and found a problem, proposing a fix. Judge whether"
+        echo "Codex's finding is actually correct — apply the same skepticism to Codex's claim that"
+        echo "Codex is asked to apply to the artifact; don't take it on faith just because it sounds"
+        echo "plausible."
+        echo ""
+        echo "Brief and criteria:"
+        cat "$BRIEF"
+        echo ""
+        echo "The exact content Codex just reviewed this round (the real file on round 1, a hypothetical"
+        echo "candidate revision on later rounds — either way, this is what Codex's critique below is"
+        echo "actually about, not necessarily $ARTIFACT's current on-disk content):"
+        echo '```'
+        printf '%s\n' "$REVIEWED_CONTENT"
+        echo '```'
+        echo ""
+        echo "Codex's critique and proposed fix:"
+        echo '```'
+        cat "$VERDICT_FILE"
+        echo '```'
+        echo ""
+        echo "Check Codex's claim against the exact content shown above — don't just judge whether it sounds"
+        echo "plausible, verify it against the real content."
+        echo ""
+        echo "Your reply's exact final non-blank line must be one of these two, nothing else:"
+        echo "ARBITER: AGREE"
+        echo "ARBITER: DISPUTE"
+        echo "If you dispute one or more specific points, say exactly what you dispute and why, citing"
+        echo "specifics from the artifact/brief, before that final line."
+      } > "$CLAUDE_PROMPT_FILE"
+
+      if ! bash "$SCRIPT_DIR/claude_call.sh" "$CLAUDE_PROMPT_FILE" "$CLAUDE_OUT" "$CLAUDE_USAGE"; then
+        echo "error: claude_call.sh (api arbiter) failed — see message above" >&2
+        exit 3
+      fi
+      ARBITER_TOKENS="$(cat "$CLAUDE_USAGE" 2>/dev/null || echo 0)"
+      echo "$ARBITER_TOKENS" >> "$LOG_FILE"
+      TOTAL_SPENT=$((TOTAL_SPENT + ARBITER_TOKENS))
+
+      echo ""
+      echo "--- round $ROUND: API arbiter's judgment ---"
+      cat "$CLAUDE_OUT"
+      echo ""
+      echo "(arbiter tokens: $ARBITER_TOKENS, cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
+      echo ""
+
+      {
+        echo "### API arbiter"
+        echo ""
+        echo "- tokens: $ARBITER_TOKENS (cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
+        echo ""
+        echo '```'
+        cat "$CLAUDE_OUT"
+        echo '```'
+        echo ""
+      } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
+
+      if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
+        OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
+        CANDIDATE="$NEW_PROPOSAL"
+        printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
+        break
+      fi
+
+      if last_line_is_arbiter_agree "$CLAUDE_OUT"; then
+        : # falls through to accept NEW_PROPOSAL below
+      elif last_line_is_arbiter_dispute "$CLAUDE_OUT"; then
+        PENDING_OBJECTION="$(cat "$CLAUDE_OUT")"
+        if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
+          OUTCOME="round limit reached ($MAX_ROUNDS) — with an arbiter objection still pending, unresolved"
+          break
+        fi
+        ROUND=$((ROUND + 1))
+        continue
+      else
+        echo "error: API arbiter's reply didn't end in exactly 'ARBITER: AGREE' or 'ARBITER: DISPUTE' — treating as a failed call rather than guessing" >&2
+        exit 3
+      fi
+    fi
+
     CANDIDATE="$NEW_PROPOSAL"
     printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
 
-    if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
-      OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
-      break
-    fi
     if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
       OUTCOME="round limit reached ($MAX_ROUNDS)"
       break
@@ -447,19 +771,16 @@ else
     rm -f "$VERDICT_FILE" "$RAW_FILE"
     if [ -z "$THREAD_ID" ]; then
       echo "== round $ROUND: Codex builds (new session) =="
-      BUILD_PROMPT="$(cat "$BRIEF")
+      PROMPT_TEXT="$(cat "$BRIEF")
 
 Produce the artifact content per the brief above (or, if it already exists, the additions/fix it
 calls for). Output ONLY the content, wrapped exactly like this, nothing outside the markers:
 $BEGIN_MARK
 <content>
 $END_MARK"
-      codex exec -s read-only --skip-git-repo-check --json \
-        -o "$VERDICT_FILE" \
-        "$BUILD_PROMPT" \
-        < /dev/null 2>/dev/null > "$RAW_FILE"
-      CODEX_STATUS=$?
-      NEW_THREAD="$(grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' "$RAW_FILE" | grep -o '[a-f0-9-]\{36\}')"
+      CODEX_ARGS=(-s read-only --skip-git-repo-check --json -o "$VERDICT_FILE")
+      run_codex
+      NEW_THREAD="$(extract_thread_id "$RAW_FILE")"
       if [ "$CODEX_STATUS" -ne 0 ] || [ -z "$NEW_THREAD" ] || [ ! -s "$VERDICT_FILE" ]; then
         echo "error: codex build call failed (exit $CODEX_STATUS) — check auth (codex login status) and model config" >&2
         exit 3
@@ -467,32 +788,42 @@ $END_MARK"
       THREAD_ID="$NEW_THREAD"
     else
       echo "== round $ROUND: Codex revises (resuming $THREAD_ID) =="
-      codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json \
-        -o "$VERDICT_FILE" \
-        "The evaluator raised this objection: $CLAUDE_FEEDBACK
+      PROMPT_TEXT="The evaluator raised this objection: $CLAUDE_FEEDBACK
 
 Revise your proposal to address it, or explain why you're keeping it as-is if the objection
 doesn't hold up. Output the (possibly revised) content wrapped exactly like this:
 $BEGIN_MARK
 <content>
-$END_MARK" \
-        < /dev/null 2>/dev/null > "$RAW_FILE"
-      CODEX_STATUS=$?
+$END_MARK"
+      CODEX_ARGS=(resume "$THREAD_ID" -c sandbox_mode="read-only" --skip-git-repo-check --json -o "$VERDICT_FILE")
+      run_codex
       if [ "$CODEX_STATUS" -ne 0 ] || [ ! -s "$VERDICT_FILE" ]; then
         echo "error: codex resume failed for thread $THREAD_ID (exit $CODEX_STATUS)" >&2
         exit 3
       fi
     fi
 
-    CODEX_TOKENS="$(grep -o '"type":"turn.completed","usage":{[^}]*}' "$RAW_FILE" \
-      | grep -o '"input_tokens":[0-9]*\|"output_tokens":[0-9]*' \
-      | grep -o '[0-9]*' | awk '{sum+=$1} END{print sum+0}')"
+    if ! CODEX_TOKENS="$(sum_codex_usage "$RAW_FILE")"; then
+      echo "error: couldn't determine round token usage from codex output — treating as a failed call" >&2
+      exit 3
+    fi
 
     CANDIDATE="$(extract_proposal "$VERDICT_FILE")"
     if [ -z "$CANDIDATE" ]; then
       echo "$CODEX_TOKENS" >> "$LOG_FILE"
       TOTAL_SPENT=$((TOTAL_SPENT + CODEX_TOKENS))
       OUTCOME="stalled — Codex produced no content to evaluate"
+      {
+        echo "## Round $ROUND (stalled)"
+        echo ""
+        echo "- tokens: $CODEX_TOKENS (cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
+        echo ""
+        echo "Codex returned no valid $BEGIN_MARK/$END_MARK block. Raw output:"
+        echo '```'
+        cat "$VERDICT_FILE"
+        echo '```'
+        echo ""
+      } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
       break
     fi
     printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
@@ -536,6 +867,31 @@ $END_MARK" \
     echo "(round tokens: $ROUND_TOKENS [codex: $CODEX_TOKENS, claude: $CLAUDE_TOKENS], cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
     echo ""
 
+    {
+      echo "## Round $ROUND"
+      echo ""
+      echo "- tokens: $ROUND_TOKENS [codex: $CODEX_TOKENS, claude: $CLAUDE_TOKENS] (cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
+      echo ""
+      echo "Codex produced:"
+      echo '```'
+      cat "$CANDIDATE_FILE"
+      echo '```'
+      echo ""
+      echo "Claude's evaluation:"
+      echo '```'
+      cat "$CLAUDE_OUT"
+      echo '```'
+      echo ""
+    } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
+
+    # Budget checked before the verdict — see the forward-loop comment above
+    # for why "whichever comes first" means tokens can end the loop even in
+    # the same round a PASS would otherwise have been read as convergence.
+    if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
+      OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
+      break
+    fi
+
     PASSED=0
     last_line_is_pass "$CLAUDE_OUT" && PASSED=1
     if [ "$PASSED" -eq 1 ]; then
@@ -545,10 +901,6 @@ $END_MARK" \
 
     CLAUDE_FEEDBACK="$(cat "$CLAUDE_OUT")"
 
-    if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
-      OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
-      break
-    fi
     if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
       OUTCOME="round limit reached ($MAX_ROUNDS)"
       break
@@ -558,11 +910,22 @@ $END_MARK" \
 fi
 
 # -------------------------------------------------------------- result ----
+AUDIT_FINALIZED=1
+{
+  echo "## Outcome"
+  echo ""
+  echo "- outcome: $OUTCOME"
+  echo "- rounds: $ROUND"
+  echo "- tokens: $TOTAL_SPENT / $MAX_TOKENS"
+  echo "- thread: $THREAD_ID"
+} >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
+
 echo "======================================"
 echo "outcome: $OUTCOME"
 echo "rounds:  $ROUND"
 echo "tokens:  $TOTAL_SPENT / $MAX_TOKENS"
 echo "thread:  $THREAD_ID"
+echo "log:     $AUDIT_LOG_FILE"
 echo "======================================"
 
 if [ -z "$CANDIDATE" ]; then
