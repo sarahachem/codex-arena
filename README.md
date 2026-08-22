@@ -10,7 +10,7 @@ Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended 
 2. **Agree on criteria.** A short table of defaults comes up for that artifact type (e.g. for a dataset: schema validity, near-duplicates, label correctness); say what to add, drop, or leave as-is.
 3. **The reviewer critiques it.** Whichever model you picked as reviewer reads the artifact against those criteria and reports what's wrong, or approves it.
 4. **The other side responds.** If it's a real problem, the fix gets made (or proposed, if nothing has direct edit access). If the finding looks wrong, it gets contested back to the reviewer with a reason — not silently accepted or silently ignored.
-5. **Repeat** until the reviewer approves, or a round/token budget runs out — whichever comes first.
+5. **Repeat** until the reviewer approves, a round/token budget runs out, or the loop stalls (`arena.sh`: the exact same critique or candidate comes back two rounds in a row — stopped early as "stalled" rather than grinding through the rest of the round budget on a repeat).
 
 **Example.** You generated a synthetic eval dataset with Claude and want a second opinion before trusting it. In Claude Code: `/codex-arena` → say you want to review `eval_cases.jsonl` → pick "dataset" → Claude and Codex agree on criteria (schema validity, duplicate rows, label correctness, edge-case coverage) → Codex critiques the file row by row → Claude fixes what holds up, pushes back on findings that don't (e.g. "this isn't a duplicate, the expected outputs differ"), and logs the reasoning either way → another round until Codex signs off.
 

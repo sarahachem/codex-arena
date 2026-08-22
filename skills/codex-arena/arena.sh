@@ -61,10 +61,19 @@
 #     candidate. This makes the run interactive at those points; it's still
 #     "unattended" in the sense that nothing else about the loop changes.
 #
+#   Early stagnation stop: if the exact same critique (forward loop) or the
+#     exact same produced candidate (reversed loop) comes back
+#     STAGNATION_ROUND_THRESHOLD times in a row (default 2, see the constant
+#     near the top of the round-loop code), the run stops early as "stalled"
+#     instead of grinding on to MAX_ROUNDS — a repeated, byte-identical
+#     response means the model isn't actually engaging with the feedback,
+#     not that it's still making progress. Exact-hash comparison, not fuzzy
+#     matching — this never fires on rephrasing, only on a literal repeat.
+#
 # Exit codes: 0 = converged/approved, 1 = stopped without approval
-#             (round/token limit, human declined a round's candidate, or
-#             nothing left to propose), 2 = setup error, 3 = a codex or
-#             claude call failed.
+#             (round/token limit, stagnation stop, human declined a round's
+#             candidate, or nothing left to propose), 2 = setup error,
+#             3 = a codex or claude call failed.
 
 set -u
 
@@ -593,6 +602,41 @@ print(total)
 
 CODEX_TIMEOUT_SECONDS=600
 
+# How many consecutive rounds of byte-identical content trigger an early
+# stagnation stop, instead of grinding on to MAX_ROUNDS. Exact-hash
+# comparison on purpose — not a fuzzy/regex similarity check — so this only
+# ever fires on genuine non-progress (the model returned the literal same
+# text again), never on a false positive from rephrasing the same point
+# differently. That trade-off is deliberate: it can miss near-duplicate
+# stagnation, but it will never wrongly stop a run that's actually still
+# making progress. MAX_ROUNDS/MAX_TOKENS remain the backstop either way.
+STAGNATION_ROUND_THRESHOLD=2
+
+# Tracks exact-repeat streaks of a piece of round-over-round content (the
+# critique in the forward loop, the produced candidate in the reversed loop).
+# Call once per round with the new content's sha256; returns 0 (and prints
+# the streak count) once the streak reaches STAGNATION_ROUND_THRESHOLD.
+STAGNATION_LAST_HASH=""
+STAGNATION_STREAK=0
+check_stagnation() {
+  local current_hash
+  current_hash="$(shasum -a 256 "$1" 2>/dev/null | awk '{print $1}')"
+  if [ -z "$current_hash" ]; then
+    # Couldn't hash it (missing shasum, unreadable file) — don't block the
+    # loop over a diagnostic feature; just skip stagnation detection this round.
+    STAGNATION_STREAK=0
+    STAGNATION_LAST_HASH=""
+    return 1
+  fi
+  if [ "$current_hash" = "$STAGNATION_LAST_HASH" ]; then
+    STAGNATION_STREAK=$((STAGNATION_STREAK + 1))
+  else
+    STAGNATION_STREAK=1
+  fi
+  STAGNATION_LAST_HASH="$current_hash"
+  [ "$STAGNATION_STREAK" -ge "$STAGNATION_ROUND_THRESHOLD" ]
+}
+
 # Runs `codex exec [resume THREAD_ID] ... -` with PROMPT_TEXT piped via a
 # private temp file on stdin, instead of embedding it as a shell argument —
 # avoids ARG_MAX on large artifacts/candidates and avoids the prompt ever
@@ -766,6 +810,19 @@ version using the same $BEGIN_MARK / $END_MARK markers."
 
     if [ "$PASSED" -eq 1 ]; then
       OUTCOME="converged"
+      break
+    fi
+
+    if check_stagnation "$VERDICT_FILE"; then
+      OUTCOME="stalled — identical critique repeated $STAGNATION_STREAK rounds in a row (round $ROUND) — likely unfixable or a false positive, stopping early instead of grinding to the round limit"
+      # Same rule as every other stop path: Codex's own proposal is only a
+      # valid candidate to offer when Codex is allowed to fix itself.
+      if [ "$API_ARBITER" -eq 0 ]; then
+        [ -n "$NEW_PROPOSAL" ] && { CANDIDATE="$NEW_PROPOSAL"; printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"; }
+      else
+        CANDIDATE=""
+        rm -f "$CANDIDATE_FILE"
+      fi
       break
     fi
 
@@ -953,11 +1010,14 @@ $END_MARK"
       echo "error: couldn't determine round token usage from codex output — treating as a failed call" >&2
       exit 3
     fi
+    # Record spend unconditionally, right after it's known — every break path
+    # below spent these tokens on the real Codex call regardless of what
+    # happens next in the round, so accounting can't wait for a specific branch.
+    echo "$CODEX_TOKENS" >> "$LOG_FILE"
+    TOTAL_SPENT=$((TOTAL_SPENT + CODEX_TOKENS))
 
     CANDIDATE="$(extract_proposal "$VERDICT_FILE")"
     if [ -z "$CANDIDATE" ]; then
-      echo "$CODEX_TOKENS" >> "$LOG_FILE"
-      TOTAL_SPENT=$((TOTAL_SPENT + CODEX_TOKENS))
       OUTCOME="stalled — Codex produced no content to evaluate"
       {
         echo "## Round $ROUND (stalled)"
@@ -979,8 +1039,37 @@ $END_MARK"
     cat "$CANDIDATE_FILE"
     echo ""
 
+    if check_stagnation "$CANDIDATE_FILE"; then
+      OUTCOME="stalled — Codex produced an identical candidate $STAGNATION_STREAK rounds in a row (round $ROUND) — not engaging with the evaluator's feedback, stopping early instead of grinding to the round limit"
+      {
+        echo "## Round $ROUND (stalled — identical candidate)"
+        echo ""
+        echo "- tokens: $CODEX_TOKENS (cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
+        echo ""
+        echo "Codex produced:"
+        echo '```'
+        cat "$CANDIDATE_FILE"
+        echo ""
+        echo '```'
+        echo ""
+      } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
+      break
+    fi
+
     if ! require_round_approval; then
       OUTCOME="stopped — human declined to approve round $ROUND's candidate before evaluator review"
+      {
+        echo "## Round $ROUND (stopped — human declined)"
+        echo ""
+        echo "- tokens: $CODEX_TOKENS (cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
+        echo ""
+        echo "Codex produced:"
+        echo '```'
+        cat "$CANDIDATE_FILE"
+        echo ""
+        echo '```'
+        echo ""
+      } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
       break
     fi
 
@@ -1020,9 +1109,12 @@ $END_MARK"
     fi
     CLAUDE_TOKENS="$(cat "$CLAUDE_USAGE" 2>/dev/null || echo 0)"
 
+    # CODEX_TOKENS was already logged/added to TOTAL_SPENT right after the
+    # Codex call above (so every break path before this point still accounts
+    # for it) — only CLAUDE_TOKENS is new here, don't double-count Codex's share.
     ROUND_TOKENS=$((CODEX_TOKENS + CLAUDE_TOKENS))
-    echo "$ROUND_TOKENS" >> "$LOG_FILE"
-    TOTAL_SPENT=$((TOTAL_SPENT + ROUND_TOKENS))
+    echo "$CLAUDE_TOKENS" >> "$LOG_FILE"
+    TOTAL_SPENT=$((TOTAL_SPENT + CLAUDE_TOKENS))
 
     echo "--- round $ROUND: Claude's evaluation ---"
     cat "$CLAUDE_OUT"
