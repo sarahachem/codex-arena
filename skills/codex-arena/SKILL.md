@@ -69,6 +69,13 @@ Lock the result into a short spec (inline is usually enough; a `SPEC.md` only if
 
 ## Phase 2 — ARENA (the loop)
 
+**Who proposes the fix depends on what `ARTIFACT` is — this is not optional, get it right before round 1:**
+
+- **Live source code, with Claude orchestrating conversationally** (Claude has Edit/Write tools and full codebase context right now): **Codex only critiques. Never ask it to propose a fix, a diff, or a patch.** Its job ends at identifying what's wrong and why. When something is confirmed real, Claude implements the fix directly in the actual files using its own tools — grounded in the real surrounding code, able to run the project's own tests — not from a text description Codex hands back. Then resume the same Codex thread and ask it to re-verify against the **real, now-changed files** (not a hypothetical) — there is no candidate/proposal-block step in this path at all, because Claude already wrote the real fix.
+- **Everything else** (a dataset, a plan, a config, or any artifact where there's no live Claude with edit tools already in the loop — including every `arena.sh` standalone run, since nothing there can implement a fix with judgment): Codex proposes a corrected version as text, wrapped in markers, exactly as in the rest of this phase below. That text is never applied directly — it's a candidate for the *next round's hypothetical re-review*, and ultimately something a human approves before it's written anywhere.
+
+These two modes are easy to blend by accident, especially mid-review when a finding turns out to need real code changes — if that happens, stop and re-read this line rather than asking Codex for "a unified diff" out of habit. If unsure which mode applies, ask: does Claude have real edit access to this artifact right now, and does implementing this fix take engineering judgment (which files, what pattern to follow, whether tests need updating)? If yes to both, it's the first mode — Codex critiques only.
+
 **Opening round** — starts a new Codex session and records its id:
 
 ```bash
