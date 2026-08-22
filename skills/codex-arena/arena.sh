@@ -45,7 +45,7 @@ BRIEF=""
 THREAD_ID=""
 MAX_TOKENS=250000
 MAX_ROUNDS=5
-STATE_DIR="${CODEX_ARENA_STATE_DIR:-/tmp/codex-arena}"
+STATE_DIR="${CODEX_ARENA_STATE_DIR:-}"
 INIT_MODE=0
 INIT_OUT=""
 NO_RUN=0
@@ -58,13 +58,23 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --init) INIT_MODE=1; shift ;;
     --no-run) NO_RUN=1; shift ;;
-    --out) INIT_OUT="$2"; shift 2 ;;
-    --artifact) ARTIFACT="$2"; shift 2 ;;
-    --brief) BRIEF="$2"; shift 2 ;;
-    --resume) THREAD_ID="$2"; shift 2 ;;
-    --max-rounds) MAX_ROUNDS="$2"; shift 2 ;;
-    --max-tokens) MAX_TOKENS="$2"; shift 2 ;;
-    --evaluator) EVALUATOR="$2"; shift 2 ;;
+    --out|--artifact|--brief|--resume|--max-rounds|--max-tokens|--evaluator)
+      if [ $# -lt 2 ]; then
+        echo "error: $1 requires a value" >&2
+        exit 2
+      fi
+      FLAG="$1"; VAL="$2"
+      case "$FLAG" in
+        --out) INIT_OUT="$VAL" ;;
+        --artifact) ARTIFACT="$VAL" ;;
+        --brief) BRIEF="$VAL" ;;
+        --resume) THREAD_ID="$VAL" ;;
+        --max-rounds) MAX_ROUNDS="$VAL" ;;
+        --max-tokens) MAX_TOKENS="$VAL" ;;
+        --evaluator) EVALUATOR="$VAL" ;;
+      esac
+      shift 2
+      ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -74,6 +84,23 @@ case "$EVALUATOR" in
   codex|claude) ;;
   *) echo "error: --evaluator must be 'codex' (default) or 'claude'" >&2; exit 2 ;;
 esac
+
+require_positive_int() {
+  # Canonical decimal integer only (no leading zeros, no leading '+'), and
+  # bounded well under bash's 64-bit arithmetic range to avoid overflow.
+  case "$1" in
+    ''|0|*[!0-9]*|0[0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 9 ]
+}
+if ! require_positive_int "$MAX_ROUNDS"; then
+  echo "error: --max-rounds must be a positive integer (no leading zeros, <=9 digits), got '$MAX_ROUNDS'" >&2
+  exit 2
+fi
+if ! require_positive_int "$MAX_TOKENS"; then
+  echo "error: --max-tokens must be a positive integer (no leading zeros, <=9 digits), got '$MAX_TOKENS'" >&2
+  exit 2
+fi
 
 # ---------------------------------------------------------------- init ----
 if [ "$INIT_MODE" -eq 1 ]; then
@@ -234,12 +261,61 @@ fi
 
 echo "evaluator: $EVALUATOR $( [ "$EVALUATOR" = "claude" ] && echo "(Codex builds, Claude evaluates via direct API call)" || echo "(Codex builds and evaluates itself, read-only every round)" )"
 
-mkdir -p "$STATE_DIR"
+if [ -z "$STATE_DIR" ]; then
+  # No explicit state dir: make a private, unpredictable one per run. A resumed
+  # run (--resume THREAD_ID) needs the SAME dir across invocations — pass
+  # CODEX_ARENA_STATE_DIR explicitly for that, don't rely on the default.
+  STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-arena.XXXXXXXXXX")" || {
+    echo "error: mktemp failed to create a state directory" >&2
+    exit 2
+  }
+else
+  if [ -e "$STATE_DIR" ]; then
+    if [ ! -d "$STATE_DIR" ] || [ -L "$STATE_DIR" ] || [ ! -O "$STATE_DIR" ]; then
+      echo "error: CODEX_ARENA_STATE_DIR exists but isn't a plain directory you own, refusing to use it: $STATE_DIR" >&2
+      exit 2
+    fi
+  else
+    mkdir -p "$STATE_DIR" || {
+      echo "error: failed to create state directory: $STATE_DIR" >&2
+      exit 2
+    }
+  fi
+fi
+if [ -L "$STATE_DIR" ]; then
+  echo "error: state dir is a symlink, refusing to use it: $STATE_DIR" >&2
+  exit 2
+fi
+if ! chmod 700 "$STATE_DIR"; then
+  echo "error: failed to set permissions on state directory: $STATE_DIR" >&2
+  exit 2
+fi
 SLUG="$(basename "$ARTIFACT" | tr -c 'a-zA-Z0-9' '-')"
 VERDICT_FILE="$STATE_DIR/${SLUG}-verdict.txt"
 RAW_FILE="$STATE_DIR/${SLUG}-raw.jsonl"
 LOG_FILE="$STATE_DIR/${SLUG}-tokens.log"
 CANDIDATE_FILE="$STATE_DIR/${SLUG}-candidate.txt"
+CLAUDE_PROMPT_FILE="$STATE_DIR/${SLUG}-claude-prompt.txt"
+CLAUDE_OUT="$STATE_DIR/${SLUG}-claude-out.txt"
+CLAUDE_USAGE="$STATE_DIR/${SLUG}-claude-usage.txt"
+
+# A pre-existing STATE_DIR (via CODEX_ARENA_STATE_DIR) is now verified to be a
+# real, owned directory, but files already inside it could still be symlinks
+# or pre-placed owned/hardlinked files planted before this run. Refuse rather
+# than write/append through any of them — resuming a THREAD_ID intentionally
+# reuses LOG_FILE across invocations, so this only rejects things that are NOT
+# a plain regular file owned by the current user (a legitimate prior run's
+# output passes; a symlink, device file, or someone else's file does not).
+for f in "$VERDICT_FILE" "$RAW_FILE" "$LOG_FILE" "$CANDIDATE_FILE" "$CLAUDE_PROMPT_FILE" "$CLAUDE_OUT" "$CLAUDE_USAGE"; do
+  if [ -L "$f" ]; then
+    echo "error: $f already exists as a symlink (possibly dangling), refusing to use this state dir" >&2
+    exit 2
+  fi
+  if [ -e "$f" ] && { [ ! -f "$f" ] || [ ! -O "$f" ]; }; then
+    echo "error: $f already exists and isn't a plain file you own, refusing to use this state dir" >&2
+    exit 2
+  fi
+done
 
 # reset per-invocation token log unless resuming a prior thread
 if [ -z "$THREAD_ID" ]; then
@@ -260,6 +336,13 @@ extract_proposal() {
   ' "$1"
 }
 
+# Only the exact final non-blank line counts as the verdict — a critique that
+# merely mentions "RESULT: PASS" mid-text (or artifact content that does)
+# must not be read as approval.
+last_line_is_pass() {
+  awk 'NF{line=$0} END{exit !(line=="RESULT: PASS" || line=="VERDICT: APPROVED")}' "$1"
+}
+
 # ---------------------------------------------------------- round loop ----
 ROUND=1
 CANDIDATE=""
@@ -267,15 +350,17 @@ OUTCOME=""
 
 if [ "$EVALUATOR" = "codex" ]; then
   while true; do
+    rm -f "$VERDICT_FILE" "$RAW_FILE"
     if [ -z "$THREAD_ID" ]; then
       echo "== round $ROUND (new session) =="
       codex exec -s read-only --skip-git-repo-check --json \
         -o "$VERDICT_FILE" \
         "$(cat "$BRIEF")" \
         < /dev/null 2>/dev/null > "$RAW_FILE"
+      CODEX_STATUS=$?
       NEW_THREAD="$(grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' "$RAW_FILE" | grep -o '[a-f0-9-]\{36\}')"
-      if [ -z "$NEW_THREAD" ] || [ ! -s "$VERDICT_FILE" ]; then
-        echo "error: codex call failed — check auth (codex login status) and model config" >&2
+      if [ "$CODEX_STATUS" -ne 0 ] || [ -z "$NEW_THREAD" ] || [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex call failed (exit $CODEX_STATUS) — check auth (codex login status) and model config" >&2
         exit 3
       fi
       THREAD_ID="$NEW_THREAD"
@@ -296,8 +381,9 @@ version using the same $BEGIN_MARK / $END_MARK markers."
         -o "$VERDICT_FILE" \
         "$RESUME_PROMPT" \
         < /dev/null 2>/dev/null > "$RAW_FILE"
-      if [ ! -s "$VERDICT_FILE" ]; then
-        echo "error: codex resume failed for thread $THREAD_ID" >&2
+      CODEX_STATUS=$?
+      if [ "$CODEX_STATUS" -ne 0 ] || [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex resume failed for thread $THREAD_ID (exit $CODEX_STATUS)" >&2
         exit 3
       fi
     else
@@ -306,8 +392,9 @@ version using the same $BEGIN_MARK / $END_MARK markers."
         -o "$VERDICT_FILE" \
         "Re-check $ARTIFACT against the same brief and criteria. End with the same exact verdict format as before." \
         < /dev/null 2>/dev/null > "$RAW_FILE"
-      if [ ! -s "$VERDICT_FILE" ]; then
-        echo "error: codex resume failed for thread $THREAD_ID" >&2
+      CODEX_STATUS=$?
+      if [ "$CODEX_STATUS" -ne 0 ] || [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex resume failed for thread $THREAD_ID (exit $CODEX_STATUS)" >&2
         exit 3
       fi
     fi
@@ -327,7 +414,7 @@ version using the same $BEGIN_MARK / $END_MARK markers."
 
     NEW_PROPOSAL="$(extract_proposal "$VERDICT_FILE")"
     PASSED=0
-    grep -qE '(VERDICT: APPROVED|RESULT: PASS)' "$VERDICT_FILE" && PASSED=1
+    last_line_is_pass "$VERDICT_FILE" && PASSED=1
 
     if [ "$PASSED" -eq 1 ]; then
       OUTCOME="converged"
@@ -357,6 +444,7 @@ else
   CLAUDE_FEEDBACK=""
   while true; do
     # 1. Codex builds or revises (still read-only — producing text, not writing files)
+    rm -f "$VERDICT_FILE" "$RAW_FILE"
     if [ -z "$THREAD_ID" ]; then
       echo "== round $ROUND: Codex builds (new session) =="
       BUILD_PROMPT="$(cat "$BRIEF")
@@ -370,9 +458,10 @@ $END_MARK"
         -o "$VERDICT_FILE" \
         "$BUILD_PROMPT" \
         < /dev/null 2>/dev/null > "$RAW_FILE"
+      CODEX_STATUS=$?
       NEW_THREAD="$(grep -o '"type":"thread.started","thread_id":"[a-f0-9-]*"' "$RAW_FILE" | grep -o '[a-f0-9-]\{36\}')"
-      if [ -z "$NEW_THREAD" ] || [ ! -s "$VERDICT_FILE" ]; then
-        echo "error: codex build call failed — check auth (codex login status) and model config" >&2
+      if [ "$CODEX_STATUS" -ne 0 ] || [ -z "$NEW_THREAD" ] || [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex build call failed (exit $CODEX_STATUS) — check auth (codex login status) and model config" >&2
         exit 3
       fi
       THREAD_ID="$NEW_THREAD"
@@ -388,8 +477,9 @@ $BEGIN_MARK
 <content>
 $END_MARK" \
         < /dev/null 2>/dev/null > "$RAW_FILE"
-      if [ ! -s "$VERDICT_FILE" ]; then
-        echo "error: codex resume failed for thread $THREAD_ID" >&2
+      CODEX_STATUS=$?
+      if [ "$CODEX_STATUS" -ne 0 ] || [ ! -s "$VERDICT_FILE" ]; then
+        echo "error: codex resume failed for thread $THREAD_ID (exit $CODEX_STATUS)" >&2
         exit 3
       fi
     fi
@@ -412,7 +502,6 @@ $END_MARK" \
     echo ""
 
     # 2. Claude evaluates, via a direct API call — read-only by nature, no tool access
-    CLAUDE_PROMPT_FILE="$STATE_DIR/${SLUG}-claude-prompt.txt"
     {
       echo "You are an adversarial reviewer. Be skeptical and specific — your job is to find what's"
       echo "wrong, not to be agreeable."
@@ -431,8 +520,6 @@ $END_MARK" \
       echo "problem. If FAIL, give the specific objection in one or two sentences."
     } > "$CLAUDE_PROMPT_FILE"
 
-    CLAUDE_OUT="$STATE_DIR/${SLUG}-claude-out.txt"
-    CLAUDE_USAGE="$STATE_DIR/${SLUG}-claude-usage.txt"
     if ! bash "$SCRIPT_DIR/claude_call.sh" "$CLAUDE_PROMPT_FILE" "$CLAUDE_OUT" "$CLAUDE_USAGE"; then
       echo "error: claude_call.sh failed — see message above" >&2
       exit 3
@@ -450,7 +537,7 @@ $END_MARK" \
     echo ""
 
     PASSED=0
-    grep -qE 'RESULT: PASS' "$CLAUDE_OUT" && PASSED=1
+    last_line_is_pass "$CLAUDE_OUT" && PASSED=1
     if [ "$PASSED" -eq 1 ]; then
       OUTCOME="converged"
       break
@@ -482,8 +569,11 @@ if [ -z "$CANDIDATE" ]; then
   if [ "$OUTCOME" = "converged" ]; then
     echo ""
     echo "No changes were ever needed — Codex approved the artifact as-is."
+    exit 0
   fi
-  exit 0
+  echo ""
+  echo "Stopped without approval ('$OUTCOME') and no candidate fix exists to review."
+  exit 1
 fi
 
 echo ""
