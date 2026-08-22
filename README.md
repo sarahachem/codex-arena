@@ -2,7 +2,7 @@
 
 A review loop between Claude Code and OpenAI's Codex CLI — one model critiques an artifact (a dataset, plan, diff, or config), the other decides what to fix, back and forth until it converges or a budget runs out. Neither model ever writes files directly.
 
-Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended via a script. You can pick which model reviews and which gets reviewed, and there's an optional mode where a second, paid Claude API call arbitrates when Codex and Claude disagree — instead of just taking one side's word for it.
+Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended via a script. You can pick which model reviews and which gets reviewed — and whichever one isn't the reviewer is the one that acts on findings, never the reviewer itself. In unattended mode, that "other model" role can be a paid Claude API call instead of Codex, so a review isn't just one model grading its own work.
 
 ## How it works
 
@@ -18,7 +18,7 @@ Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended 
 
 **Conversationally, with Claude Code.** Install the plugin, then say `/codex-arena` or ask Claude to review/generate something with it. Claude drives the loop, reads Codex's critiques, and can push back on findings it disagrees with, with the reason logged.
 
-**Standalone.** `arena.sh` runs the whole loop unattended, and either model can end up as the critic — the flag picks who, not whether the artifact is new or already exists (Codex reads/relays existing content either way). By default (`--evaluator codex`) Codex is the critic and no Claude is involved at all — its findings are accepted as-is, carried into the next round unquestioned. Add `--api-arbiter` to change that: a paid Claude API call judges each disputed finding before it's accepted, and pushes back on Codex if it disagrees — same mechanism as the conversational contest step, just automated. `--init` asks you for criteria in plain English at the start, and it stops once, at the end, to ask whether to actually write the result to disk (with a diff shown first). There's also `--evaluator claude`, which flips who critiques: Codex reads (or, for a new artifact, generates) the content and hands it off, and Claude is the one evaluating it via the same direct, separately-billed Anthropic API call (needs its own `ANTHROPIC_API_KEY`, not a Claude Code/Claude.ai subscription) — `--api-arbiter` and `--evaluator claude` are mutually exclusive, since `--evaluator claude` already has Claude arbitrating.
+**Standalone.** `arena.sh` runs the whole loop unattended, and either model can end up as the critic — the flag picks who, not whether the artifact is new or already exists (Codex reads/relays existing content either way). The rule is consistent everywhere: whichever model evaluates only ever judges — it never writes the accepted fix, that's the other model's job. By default (`--evaluator codex`, no key) Codex is the only model reachable at all in an unattended script, so it necessarily judges *and* fixes itself — there's no other model to hand the fix to for free. Add `--api-arbiter` to change that: Codex still critiques, but now only ever critiques — a paid Claude API call writes every accepted fix (independently, not just accepting Codex's own proposed one) or disputes the finding and sends it back to Codex to withdraw or defend. `--init` asks you for criteria in plain English at the start, and it stops once, at the end, to ask whether to actually write the result to disk (with a diff shown first). There's also `--evaluator claude`, which flips the roles entirely: Codex reads (or, for a new artifact, generates) the content and does the fixing, and Claude is the one evaluating it via the same direct, separately-billed Anthropic API call (needs its own `ANTHROPIC_API_KEY`, not a Claude Code/Claude.ai subscription) — `--api-arbiter` and `--evaluator claude` are mutually exclusive, since `--evaluator claude` already has Claude as the evaluator.
 
 ## Install
 
@@ -48,7 +48,7 @@ arena.sh --init --artifact path/to/your/file.json
 # Or supply a pre-written brief and run directly:
 arena.sh --artifact path/to/your/file.json --brief ARENA-BRIEF.md --max-rounds 3
 
-# Same, but with a paid Claude API call arbitrating disputed Codex findings:
+# Same, but Codex only judges — a paid Claude API call writes every accepted fix:
 arena.sh --artifact path/to/your/file.json --brief ARENA-BRIEF.md --api-arbiter
 ```
 

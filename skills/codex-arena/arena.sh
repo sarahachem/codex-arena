@@ -32,16 +32,19 @@
 #     of any Claude Code/Claude.ai subscription. Ask before assuming the user
 #     wants to set this up; it costs real money on its own account.
 #
-#   --api-arbiter (only with --evaluator codex, the default): opt-in. Without
-#     it, a Codex finding is always taken at face value — accepted and carried
-#     into the next round unquestioned, exactly as if no arbiter existed. With
-#     it, each round Codex flags a problem, a real Claude (via the same paid
-#     ANTHROPIC_API_KEY path as --evaluator claude) is asked to judge whether
-#     the finding actually holds up before it's accepted; if Claude disputes
-#     it, the specific objection is put back to Codex to withdraw or defend
-#     (same contest mechanics the conversational skill uses), rather than
-#     blindly folding an unexamined finding into the candidate. Same billing
-#     caveat as --evaluator claude — ask before assuming the user wants it on.
+#   --api-arbiter (only with --evaluator codex, the default): opt-in, needs a
+#     real ANTHROPIC_API_KEY (same paid path as --evaluator claude). Without
+#     it, Codex is the only model in the loop — it judges the artifact AND
+#     writes its own fix, self-reviewed round after round; there's no other
+#     model to hand the fix to without paying for API access. With it, Codex
+#     becomes evaluator-only (mirrors --evaluator claude in reverse — the
+#     evaluator judges, it never writes the accepted fix): each round Codex
+#     critiques, and Claude either writes its own corrected version (which may
+#     differ from what Codex proposed — Codex's own fix is shown to Claude as
+#     context, never used directly) or disputes the finding, putting the
+#     specific objection back to Codex to withdraw or defend (same contest
+#     mechanics the conversational skill uses). Same billing caveat as
+#     --evaluator claude — ask before assuming the user wants it on.
 #
 # Exit codes: 0 = converged/approved, 1 = stopped without approval
 #             (round/token limit, or nothing left to propose), 2 = setup
@@ -282,7 +285,7 @@ fi
 if [ "$EVALUATOR" = "claude" ]; then
   echo "evaluator: claude (Codex builds, Claude evaluates via direct API call)"
 elif [ "$API_ARBITER" -eq 1 ]; then
-  echo "evaluator: codex, with API arbiter (Codex critiques, a paid Claude API call judges disputed findings before they're accepted)"
+  echo "evaluator: codex, with API arbiter (Codex only judges — a paid Claude API call writes every accepted fix, or disputes the finding back to Codex)"
 else
   echo "evaluator: codex (Codex builds and evaluates itself, read-only every round — no arbiter)"
 fi
@@ -589,9 +592,9 @@ a corrected-version proposal if problems (including any you're still defending) 
         exit 3
       fi
     elif [ -n "$CANDIDATE" ]; then
-      echo "== round $ROUND (resuming $THREAD_ID — reviewing proposed fix as a hypothetical) =="
+      echo "== round $ROUND (resuming $THREAD_ID — reviewing a candidate fix as a hypothetical) =="
       REVIEWED_CONTENT="$CANDIDATE"
-      PROMPT_TEXT="Here is a candidate revision incorporating the fix you proposed. This has NOT been
+      PROMPT_TEXT="Here is a candidate revision$( [ "$API_ARBITER" -eq 1 ] && echo " (written independently, not necessarily matching what you proposed)" ). This has NOT been
 written to the real file — it is purely hypothetical, for you to re-review as if it replaced
 $ARTIFACT. Check it against the same brief and criteria as before.
 
@@ -653,8 +656,20 @@ version using the same $BEGIN_MARK / $END_MARK markers."
     # convergence is honored.
     if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
       OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
-      NEW_PROPOSAL="$(extract_proposal "$VERDICT_FILE")"
-      [ -n "$NEW_PROPOSAL" ] && { CANDIDATE="$NEW_PROPOSAL"; printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"; }
+      # Codex's own proposal is only a valid candidate to offer when Codex is
+      # allowed to fix itself (no arbiter). With --api-arbiter, Codex's fix was
+      # never authorized — only Claude's would be, and Claude hasn't run yet
+      # this round, so there's genuinely no candidate to offer.
+      if [ "$API_ARBITER" -eq 0 ]; then
+        NEW_PROPOSAL="$(extract_proposal "$VERDICT_FILE")"
+        [ -n "$NEW_PROPOSAL" ] && { CANDIDATE="$NEW_PROPOSAL"; printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"; }
+      else
+        # A CANDIDATE from an earlier hypothetical-review round is stale here —
+        # this round's fresh Codex critique found something (or ran out of
+        # budget before we know), and Claude never got to weigh in on it.
+        CANDIDATE=""
+        rm -f "$CANDIDATE_FILE"
+      fi
       break
     fi
 
@@ -667,18 +682,28 @@ version using the same $BEGIN_MARK / $END_MARK markers."
       break
     fi
 
-    if [ -z "$NEW_PROPOSAL" ]; then
+    if [ -z "$NEW_PROPOSAL" ] && [ "$API_ARBITER" -eq 0 ]; then
       OUTCOME="stalled — Codex flagged problems but proposed no fix to iterate on"
       break
     fi
+    # With --api-arbiter, Codex not proposing a fix isn't stalling — Codex is
+    # evaluator-only in this mode, so its own fix was never required. Claude
+    # constructs a correction from Codex's critique (and the real content)
+    # whether or not Codex happened to include one.
 
     if [ "$API_ARBITER" -eq 1 ]; then
+      # Codex is the evaluator only in this mode — it judges but never writes the
+      # accepted fix, the same rule --evaluator claude already follows in reverse.
+      # Codex's own proposed fix (NEW_PROPOSAL) is shown to Claude as context/a
+      # hint, but is never used directly — Claude either writes its own corrected
+      # version, or disputes the finding and Codex reconsiders. Symmetric with
+      # the reversed direction: whichever model is NOT the evaluator is the one
+      # that acts (fix or defend), the evaluator only ever judges.
       {
-        echo "You are an impartial arbiter, not an advocate for either side. Codex reviewed an artifact"
-        echo "against the brief and criteria below and found a problem, proposing a fix. Judge whether"
-        echo "Codex's finding is actually correct — apply the same skepticism to Codex's claim that"
-        echo "Codex is asked to apply to the artifact; don't take it on faith just because it sounds"
-        echo "plausible."
+        echo "Codex reviewed an artifact against the brief and criteria below and found a problem,"
+        echo "proposing its own fix. In this mode Codex's proposed fix is not used directly — you decide"
+        echo "independently what happens next. Apply the same skepticism to Codex's claim that Codex is"
+        echo "asked to apply to the artifact; don't take it on faith just because it sounds plausible."
         echo ""
         echo "Brief and criteria:"
         cat "$BRIEF"
@@ -690,7 +715,8 @@ version using the same $BEGIN_MARK / $END_MARK markers."
         printf '%s\n' "$REVIEWED_CONTENT"
         echo '```'
         echo ""
-        echo "Codex's critique and proposed fix:"
+        echo "Codex's critique, and Codex's OWN proposed fix (context only, not authoritative — you may"
+        echo "agree with it, write a different fix, or reject the finding entirely):"
         echo '```'
         cat "$VERDICT_FILE"
         echo ""
@@ -699,11 +725,18 @@ version using the same $BEGIN_MARK / $END_MARK markers."
         echo "Check Codex's claim against the exact content shown above — don't just judge whether it sounds"
         echo "plausible, verify it against the real content."
         echo ""
-        echo "Your reply's exact final non-blank line must be one of these two, nothing else:"
-        echo "ARBITER: AGREE"
-        echo "ARBITER: DISPUTE"
-        echo "If you dispute one or more specific points, say exactly what you dispute and why, citing"
-        echo "specifics from the artifact/brief, before that final line."
+        echo "If Codex's finding is legitimate: write your OWN corrected version of the full artifact that"
+        echo "resolves it — it does not need to match Codex's proposed fix. Wrap it EXACTLY like this,"
+        echo "nothing else inside:"
+        echo "$BEGIN_MARK"
+        echo "<full corrected content of the artifact>"
+        echo "$END_MARK"
+        echo "Then end your reply with exactly: ARBITER: AGREE"
+        echo ""
+        echo "If you dispute the finding: do NOT include a fix block. Say exactly what you dispute and why,"
+        echo "citing specifics from the content/brief, then end your reply with exactly: ARBITER: DISPUTE"
+        echo ""
+        echo "Your reply's exact final non-blank line must be one of those two lines, nothing else."
       } > "$CLAUDE_PROMPT_FILE"
 
       if ! bash "$SCRIPT_DIR/claude_call.sh" "$CLAUDE_PROMPT_FILE" "$CLAUDE_OUT" "$CLAUDE_USAGE"; then
@@ -715,48 +748,67 @@ version using the same $BEGIN_MARK / $END_MARK markers."
       TOTAL_SPENT=$((TOTAL_SPENT + ARBITER_TOKENS))
 
       echo ""
-      echo "--- round $ROUND: API arbiter's judgment ---"
+      echo "--- round $ROUND: API evaluator's response ---"
       cat "$CLAUDE_OUT"
       echo ""
       echo "(arbiter tokens: $ARBITER_TOKENS, cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
       echo ""
 
       {
-        echo "### API arbiter"
+        echo "### API evaluator (Claude)"
         echo ""
         echo "- tokens: $ARBITER_TOKENS (cumulative: $TOTAL_SPENT / $MAX_TOKENS)"
         echo ""
         echo '```'
         cat "$CLAUDE_OUT"
+        echo ""
         echo '```'
         echo ""
       } >> "$AUDIT_LOG_FILE" || echo "warning: failed to append to audit log at $AUDIT_LOG_FILE — this round's record may be incomplete" >&2
 
       if [ "$TOTAL_SPENT" -gt "$MAX_TOKENS" ]; then
         OUTCOME="token budget exceeded ($TOTAL_SPENT > $MAX_TOKENS)"
-        CANDIDATE="$NEW_PROPOSAL"
-        printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
+        # Claude's response, if any, hasn't been validated/extracted yet at this
+        # point — don't guess at a candidate. Also clear whatever CANDIDATE was
+        # carried in from a prior round: it was already reviewed and found
+        # wanting this round, so offering it at Wrap-up would present something
+        # neither Codex's current critique nor Claude approved.
+        CANDIDATE=""
+        rm -f "$CANDIDATE_FILE"
         break
       fi
 
       if last_line_is_arbiter_agree "$CLAUDE_OUT"; then
-        : # falls through to accept NEW_PROPOSAL below
+        CLAUDE_FIX="$(extract_proposal "$CLAUDE_OUT")"
+        if [ -z "$CLAUDE_FIX" ]; then
+          echo "error: API evaluator said ARBITER: AGREE but included no $BEGIN_MARK/$END_MARK fix block — treating as a failed call rather than guessing" >&2
+          exit 3
+        fi
+        CANDIDATE="$CLAUDE_FIX"
+        printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
       elif last_line_is_arbiter_dispute "$CLAUDE_OUT"; then
         PENDING_OBJECTION="$(cat "$CLAUDE_OUT")"
         if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
-          OUTCOME="round limit reached ($MAX_ROUNDS) — with an arbiter objection still pending, unresolved"
+          OUTCOME="round limit reached ($MAX_ROUNDS) — with an evaluator dispute still pending, unresolved"
+          # Whatever CANDIDATE carried in from a prior round was disputed
+          # unresolved this round — don't offer it as if it were approved.
+          CANDIDATE=""
+          rm -f "$CANDIDATE_FILE"
           break
         fi
         ROUND=$((ROUND + 1))
         continue
       else
-        echo "error: API arbiter's reply didn't end in exactly 'ARBITER: AGREE' or 'ARBITER: DISPUTE' — treating as a failed call rather than guessing" >&2
+        echo "error: API evaluator's reply didn't end in exactly 'ARBITER: AGREE' or 'ARBITER: DISPUTE' — treating as a failed call rather than guessing" >&2
         exit 3
       fi
+    else
+      # No API key / no arbiter: Codex is the only model reachable in this
+      # unattended script, so it necessarily judges AND fixes itself — there is
+      # no other model available to hand the fix to without a paid API call.
+      CANDIDATE="$NEW_PROPOSAL"
+      printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
     fi
-
-    CANDIDATE="$NEW_PROPOSAL"
-    printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
 
     if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
       OUTCOME="round limit reached ($MAX_ROUNDS)"
