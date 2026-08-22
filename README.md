@@ -43,20 +43,20 @@ bash ~/.claude/skills/codex-arena/setup.sh
 
 ```bash
 # Ask for criteria in plain English, then run the full loop automatically:
-arena.sh --init --artifact path/to/your/file.json
+arena.sh --init --artifact path/to/your/artifact
 
 # Or supply a pre-written brief and run directly:
-arena.sh --artifact path/to/your/file.json --brief ARENA-BRIEF.md --max-rounds 3
+arena.sh --artifact path/to/your/artifact --brief ARENA-BRIEF.md --max-rounds 3
 
 # If an Anthropic API key is already available (env var, or cached from a
 # prior --evaluator claude run) this automatically has Codex only judge —
 # a paid Claude API call writes every accepted fix. No flag needed; it's
 # the same command as above, the behavior just depends on key availability:
-arena.sh --artifact path/to/your/file.json --brief ARENA-BRIEF.md
+arena.sh --artifact path/to/your/artifact --brief ARENA-BRIEF.md
 
 # Pause and ask before each round's fix propagates, instead of running fully
 # automatically — shows a diff, waits for [y/N], stops the run on a decline:
-arena.sh --artifact path/to/your/file.json --brief ARENA-BRIEF.md --require-approval
+arena.sh --artifact path/to/your/artifact --brief ARENA-BRIEF.md --require-approval
 ```
 
 See `skills/codex-arena/SKILL.md` for the full mechanics, safety rules (Codex never gets write access, ever), and the conversational flow Claude follows.
