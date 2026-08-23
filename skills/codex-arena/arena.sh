@@ -189,7 +189,12 @@ if [ "$INIT_MODE" -eq 1 ]; then
 - Race conditions or concurrency bugs
 - Missing edge cases
 - Unnecessary complexity or a simpler alternative
-- Consistency with existing patterns in the surrounding code" ;;
+- Consistency with existing patterns in the surrounding code
+- Clean architecture: separation of concerns, no god classes/functions,
+  dependencies pointing inward (business logic not reaching into
+  transport/persistence details)
+- Current idioms for the language/framework, not patterns that are
+  deprecated or superseded" ;;
     3)
       GUESS_TYPE="implementation plan"
       DEFAULTS="- Security holes
