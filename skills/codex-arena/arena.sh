@@ -212,7 +212,21 @@ if [ "$INIT_MODE" -eq 1 ]; then
 - Schema or data-model conflicts
 - Wrong assumptions the plan rests on
 - Observability gaps
-- A simpler approach that was overlooked" ;;
+- A simpler approach that was overlooked
+- Architectural commitments that bake in a structural problem before any
+  code exists: new state introduced as a global/singleton/static, work
+  piled onto an already-oversized class, business logic placed in the UI
+  or transport layer
+- Migration and rollout for any schema or data change: backfill for rows
+  that already exist, whether old and new code can run side by side during
+  the deploy, what happens to work already in flight
+- Reversibility: can this be rolled back once shipped — and if it genuinely
+  can't, does the plan say so
+- Sequencing: a step depending on something a later step creates; whether
+  it can ship in safe increments instead of one cutover
+- How it gets verified BEFORE shipping, not only monitored after
+- Steps vague enough to defer the actual decision (\"handle errors
+  appropriately\", \"add caching\")" ;;
     4)
       GUESS_TYPE="config file"
       DEFAULTS="- Values inconsistent with what's declared elsewhere in the repo
