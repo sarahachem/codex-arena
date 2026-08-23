@@ -2,7 +2,7 @@
 
 A review loop between Claude Code and OpenAI's Codex CLI — one model critiques an artifact (a dataset, plan, diff, or config), the other decides what to fix, back and forth until it converges or a budget runs out. Neither model ever writes files directly.
 
-Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended via a script. You can pick which model reviews and which gets reviewed — and whichever one isn't the reviewer is the one that acts on findings, never the reviewer itself. In unattended mode, that "other model" role can be a paid Claude API call instead of Codex, so a review isn't just one model grading its own work.
+Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended via a script. You can pick which model reviews and which gets reviewed — and whichever one isn't the reviewer is the one that acts on findings, never the reviewer itself. In unattended mode, that "other model" role can be Claude over the Anthropic API instead of Codex, so a review isn't just one model grading its own work.
 
 ## How it works
 
@@ -24,11 +24,13 @@ One rule holds everywhere: **whichever model evaluates only ever judges** — it
 
 Which mode you get depends on your credentials:
 
-| | Who critiques | Who writes the fix | Cost |
+| | Who critiques | Who writes the fix | Anthropic API calls |
 |---|---|---|---|
-| `--evaluator codex`, no Anthropic credentials | Codex | Codex — it's the only model an unattended script can reach, so it self-reviews | Free |
-| `--evaluator codex`, credentials found | Codex | Claude, via a paid API call — writes its own fix (not just accepting Codex's proposal), or disputes the finding back to Codex to withdraw or defend | Billed |
-| `--evaluator claude` | Claude, via a paid API call | Codex — which also generates the artifact if it doesn't exist yet | Billed |
+| `--evaluator codex`, no Anthropic credentials | Codex | Codex — it's the only model an unattended script can reach, so it self-reviews | None |
+| `--evaluator codex`, credentials found | Codex | Claude, over the API — writes its own fix (not just accepting Codex's proposal), or disputes the finding back to Codex to withdraw or defend | Yes — consumes your inference budget |
+| `--evaluator claude` | Claude, over the API | Codex — which also generates the artifact if it doesn't exist yet | Yes — consumes your inference budget |
+
+The auth path (an `ant auth login` OAuth profile vs. an `ANTHROPIC_API_KEY`) changes how the script *authenticates*, not whether a call happens — both hit the same `/v1/messages` endpoint and both consume inference. Which bucket that draws from depends on your account; check the console if the specifics matter.
 
 The middle row is **automatic, not a flag**: credentials are detected silently at startup — an `ant auth login` profile, `ANTHROPIC_ARENA_KEY`, or a key cached from a prior run. Authenticate once and every later `--evaluator codex` run picks it up on its own.
 
@@ -76,7 +78,7 @@ arena.sh --artifact path/to/your/artifact --brief ARENA-BRIEF.md --max-rounds 3
 
 # If Anthropic credentials are already available (an `ant auth login`
 # profile, an env var, or a key cached from a prior --evaluator claude run)
-# this automatically has Codex only judge — a paid Claude API call writes
+# this automatically has Codex only judge — a Claude API call writes
 # every accepted fix. No flag needed; it's the same command as above, the
 # behavior just depends on whether credentials are present:
 arena.sh --artifact path/to/your/artifact --brief ARENA-BRIEF.md

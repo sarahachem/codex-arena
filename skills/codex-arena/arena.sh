@@ -1004,7 +1004,7 @@ version using the same $BEGIN_MARK / $END_MARK markers."
     else
       # No API key / no arbiter: Codex is the only model reachable in this
       # unattended script, so it necessarily judges AND fixes itself — there is
-      # no other model available to hand the fix to without a paid API call.
+      # no other model available to hand the fix to without an API call.
       CANDIDATE="$NEW_PROPOSAL"
       printf '%s' "$CANDIDATE" > "$CANDIDATE_FILE"
     fi
