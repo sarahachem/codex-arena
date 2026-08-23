@@ -193,14 +193,15 @@ if [ "$INIT_MODE" -eq 1 ]; then
 - Clean architecture: separation of concerns, no god classes/functions,
   dependencies pointing inward (business logic not reaching into
   transport/persistence details)
-- Dated design/architecture patterns where a current, well-established one
-  fits better: deep inheritance where composition belongs, hand-rolled
-  machinery a standard primitive now covers, global/singleton state where
-  injected dependencies belong
+- Structural choices making the code harder than it needs to be: mutable
+  state shared through module globals or singletons instead of passed in
+  (invites races, forces tests to patch and reset), a hand-rolled version
+  of something the language/platform/database already does correctly, an
+  inheritance chain where passing the behavior in would be simpler
 - Current language/framework idioms, not APIs that are deprecated or
   superseded
-  (For those last two: flag what causes real friction — workarounds,
-  duplication, untestable seams, bugs the pattern invites. \"This is the
+  (For those last two: name the concrete cost — the race it allows, the
+  test that can't be written, the duplication it forces. \"This is the
   newer way\" is not by itself a finding.)" ;;
     3)
       GUESS_TYPE="implementation plan"
