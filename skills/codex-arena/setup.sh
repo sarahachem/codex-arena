@@ -123,6 +123,26 @@ if [ -f "$TARGET_DIR/SKILL.md" ]; then
   fi
 fi
 
+# 5. Anthropic credentials — OPTIONAL. Only the reversed direction
+# (--evaluator claude) calls the Anthropic API; the default direction runs
+# Claude locally and only shells out to codex. Never sets FAIL.
+say ""
+say "4. Anthropic credentials (optional — only for --evaluator claude)"
+if command -v ant >/dev/null 2>&1; then
+  if ant auth status >/dev/null 2>&1; then
+    ok "logged in via 'ant auth' — no API key needed"
+  else
+    warn "the 'ant' CLI is installed but not logged in. Run:"
+    say ""
+    say "      ant auth login"
+    say ""
+    say "  (or leave it — you'll be prompted for an API key if you ever run --evaluator claude)"
+  fi
+else
+  warn "no 'ant' CLI found. Reversed runs will prompt for an API key."
+  say "  To skip keys entirely, install the Anthropic CLI and run 'ant auth login'."
+fi
+
 say ""
 if [ "$FAIL" -eq 0 ]; then
   say "== all set — try: /codex-arena =="

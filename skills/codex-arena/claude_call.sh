@@ -7,7 +7,8 @@
 # needed one.
 #
 # Usage: claude_call.sh <prompt-file> <output-text-file> <output-usage-file>
-# Requires: claude_auth.sh sourced first, ANTHROPIC_ARENA_KEY set.
+# Requires: ensure_anthropic_key (from claude_auth.sh) to have run first, which
+# sets ANTHROPIC_ARENA_AUTH_MODE to either "oauth" or "api_key".
 
 set -u
 
@@ -16,8 +17,14 @@ OUT_TEXT="$2"
 OUT_USAGE="$3"
 MODEL="${ANTHROPIC_ARENA_MODEL:-claude-sonnet-5}"
 
-if [ -z "${ANTHROPIC_ARENA_KEY:-}" ]; then
-  echo "error: ANTHROPIC_ARENA_KEY not set — run claude_auth.sh's ensure_anthropic_key first" >&2
+# Source the auth helpers so the two modes' header shapes live in exactly one
+# place. Sourcing only defines functions — it never prompts.
+ARENA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+. "$ARENA_DIR/claude_auth.sh"
+
+if [ "${ANTHROPIC_ARENA_AUTH_MODE:-}" != "oauth" ] && [ -z "${ANTHROPIC_ARENA_KEY:-}" ]; then
+  echo "error: no Anthropic credentials — run claude_auth.sh's ensure_anthropic_key first" >&2
   exit 1
 fi
 
@@ -31,18 +38,26 @@ print(json.dumps({
     "messages": [{"role": "user", "content": sys.stdin.read()}],
 }))' < "$PROMPT_FILE")"
 
-# The API key goes in a private curl config file, not a -H argument — args
-# are visible to any other process on the box via `ps`; a curl config isn't.
+# Credentials go in a private curl config file, not a -H argument — args are
+# visible to any other process on the box via `ps`; a curl config isn't.
+# _arena_write_auth_headers picks the right shape for the active mode: a
+# freshly-minted `Authorization: Bearer` token for oauth (re-minted per call so
+# it can't go stale mid-run), or x-api-key for a long-lived key.
 CURL_CONFIG="$(mktemp)" || {
   echo "error: mktemp failed for curl config" >&2
   exit 1
 }
 chmod 600 "$CURL_CONFIG"
+if ! _arena_write_auth_headers "$CURL_CONFIG"; then
+  rm -f "$CURL_CONFIG"
+  echo "error: could not build Anthropic auth headers (mode=${ANTHROPIC_ARENA_AUTH_MODE:-api_key})." >&2
+  echo "       If you're using OAuth, check that 'ant auth status' still reports an active profile." >&2
+  exit 1
+fi
 {
-  printf 'header = "x-api-key: %s"\n' "$ANTHROPIC_ARENA_KEY"
   printf 'header = "anthropic-version: 2023-06-01"\n'
   printf 'header = "content-type: application/json"\n'
-} > "$CURL_CONFIG"
+} >> "$CURL_CONFIG"
 
 RESPONSE="$(curl -sS \
   --connect-timeout 15 \

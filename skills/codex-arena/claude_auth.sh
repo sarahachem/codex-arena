@@ -1,33 +1,104 @@
 #!/usr/bin/env bash
-# Ensures an Anthropic API key is available for claude_call.sh (the Claude
-# side of a Codex-orchestrated run). Checks env, then a cached file, then
-# prompts interactively and validates with a real API call — same shape as
-# `codex login`, since there's no local `claude` CLI to shell out to.
+# Ensures Anthropic credentials are available for claude_call.sh (the Claude
+# side of a Codex-orchestrated run).
 #
-# Usage: source this file, then use $ANTHROPIC_ARENA_KEY.
+# Two auth modes, tried in this order:
+#   oauth   — an `ant auth login` profile. Preferred: nothing to create, paste,
+#             or store, and the token is short-lived and auto-refreshed. This is
+#             the real analogue of `codex login`, which didn't exist when this
+#             file was first written.
+#   api_key — a long-lived key from env or the cached file, prompted for
+#             interactively as a fallback for users without the `ant` CLI.
+#
+# The active mode is exported as $ANTHROPIC_ARENA_AUTH_MODE because the two
+# modes need *different request headers* (see _arena_write_auth_headers), not
+# just a different secret — claude_call.sh sources this file to reuse them.
+#
+# Usage: source this file, call ensure_anthropic_key, then use
+# _arena_write_auth_headers when building a request.
 
 set -u
 
 ARENA_KEY_FILE="$HOME/.claude/skills/codex-arena/.anthropic_key"
+# OAuth access tokens are rejected without this beta header, and they go on
+# `Authorization: Bearer`, never `x-api-key` — swapping auth modes is a header
+# change, not just a credential swap.
+ARENA_OAUTH_BETA="oauth-2025-04-20"
 
-_arena_validate_key() {
-  local key="$1"
+# True when the `ant` CLI is installed AND has an active credential source.
+# Checks the exit code, never the text: `ant auth status` prints a human
+# string, and grepping it for "logged in" would also match "Not logged in"
+# (exactly the bug this plugin's setup.sh already hit with `codex login`).
+_arena_have_ant_oauth() {
+  command -v ant >/dev/null 2>&1 || return 1
+  ant auth status >/dev/null 2>&1
+}
+
+# Prints a short-lived OAuth access token on stdout. Deliberately re-run for
+# every request rather than captured once: these tokens expire, and letting
+# `ant` mint a fresh one each time is what makes refresh transparent during a
+# long multi-round arena run. --access-token is required — the bare form
+# prints a JSON object, not a token.
+_arena_oauth_token() {
+  local token
+  token="$(ant auth print-credentials --access-token 2>/dev/null)" || return 1
+  [ -n "$token" ] || return 1
+  printf '%s' "$token"
+}
+
+# Appends the auth headers for the ACTIVE mode to the curl config file at $1.
+# Secrets go in a private curl config, never in -H argv — argv is visible to
+# any other process on the box via `ps`, a curl config isn't.
+_arena_write_auth_headers() {
+  local config="$1"
+  if [ "${ANTHROPIC_ARENA_AUTH_MODE:-api_key}" = "oauth" ]; then
+    local token
+    token="$(_arena_oauth_token)" || return 1
+    printf 'header = "authorization: Bearer %s"\n' "$token" >> "$config"
+    printf 'header = "anthropic-beta: %s"\n' "$ARENA_OAUTH_BETA" >> "$config"
+  else
+    [ -n "${ANTHROPIC_ARENA_KEY:-}" ] || return 1
+    printf 'header = "x-api-key: %s"\n' "$ANTHROPIC_ARENA_KEY" >> "$config"
+  fi
+}
+
+# Validates whatever mode/credential is currently set by making one real
+# (tiny, billed) request. Callers must disclose before invoking this.
+_arena_validate_current_auth() {
   local resp
   local config
-  # Key goes in a private curl config file, not -H argv — argv is visible to
-  # any other process on the box via `ps`, a curl config isn't.
   config="$(mktemp)" || return 1
   chmod 600 "$config"
+  if ! _arena_write_auth_headers "$config"; then
+    rm -f "$config"
+    return 1
+  fi
   {
-    printf 'header = "x-api-key: %s"\n' "$key"
     printf 'header = "anthropic-version: 2023-06-01"\n'
     printf 'header = "content-type: application/json"\n'
-  } > "$config"
+  } >> "$config"
   resp="$(curl -s --connect-timeout 15 --max-time 30 -K "$config" -o /dev/null -w '%{http_code}' \
     https://api.anthropic.com/v1/messages \
     -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}')"
   rm -f "$config"
   [ "$resp" = "200" ]
+}
+
+# Back-compat wrapper: validate a specific API key string.
+_arena_validate_key() {
+  ANTHROPIC_ARENA_AUTH_MODE=api_key ANTHROPIC_ARENA_KEY="$1" _arena_validate_current_auth
+}
+
+# Sets oauth mode and confirms it actually works. Returns 1 without side
+# effects if `ant` is absent, has no active profile, or the token is rejected.
+_arena_try_oauth() {
+  _arena_have_ant_oauth || return 1
+  if ANTHROPIC_ARENA_AUTH_MODE=oauth _arena_validate_current_auth; then
+    ANTHROPIC_ARENA_AUTH_MODE=oauth
+    export ANTHROPIC_ARENA_AUTH_MODE
+    return 0
+  fi
+  return 1
 }
 
 # True if a key looks structurally available WITHOUT any network call — env
@@ -38,6 +109,11 @@ _arena_validate_key() {
 # disclosure has to happen ahead of it, not after.
 anthropic_key_structurally_available() {
   if [ -n "${ANTHROPIC_ARENA_KEY:-}" ]; then
+    return 0
+  fi
+  # An `ant` OAuth profile counts: it needs no key file and no prompt, so a
+  # run that finds one can proceed unattended exactly like a cached key.
+  if _arena_have_ant_oauth; then
     return 0
   fi
   if [ -f "$ARENA_KEY_FILE" ] && [ ! -L "$ARENA_KEY_FILE" ] && [ -O "$ARENA_KEY_FILE" ] && [ -r "$ARENA_KEY_FILE" ] && [ -s "$ARENA_KEY_FILE" ]; then
@@ -59,6 +135,10 @@ try_load_anthropic_key_noninteractive() {
   if [ -n "${ANTHROPIC_ARENA_KEY:-}" ]; then
     return 0
   fi
+  # OAuth first — it's the mode that needs no stored secret at all.
+  if _arena_try_oauth; then
+    return 0
+  fi
   if [ ! -f "$ARENA_KEY_FILE" ] || [ -L "$ARENA_KEY_FILE" ] || [ ! -O "$ARENA_KEY_FILE" ] || [ ! -r "$ARENA_KEY_FILE" ]; then
     return 1
   fi
@@ -77,6 +157,14 @@ ensure_anthropic_key() {
     return 0
   fi
 
+  # OAuth first: no key to create, nothing written to disk by this plugin, and
+  # the token refreshes itself. Only fall through to the key paths below for
+  # users who don't have the `ant` CLI or an active profile.
+  if _arena_try_oauth; then
+    echo "using your existing Anthropic login (ant auth) — no API key needed." >&2
+    return 0
+  fi
+
   if [ -f "$ARENA_KEY_FILE" ] && [ ! -L "$ARENA_KEY_FILE" ]; then
     CACHED_KEY="$(cat "$ARENA_KEY_FILE")"
     if [ -n "$CACHED_KEY" ] && _arena_validate_key "$CACHED_KEY"; then
@@ -87,8 +175,19 @@ ensure_anthropic_key() {
     echo "cached key at $ARENA_KEY_FILE didn't validate — asking again." >&2
   fi
 
-  echo "This run needs an Anthropic API key so Claude can act as the critic." >&2
-  echo "Get one at: https://console.anthropic.com/settings/keys" >&2
+  echo "This run needs Anthropic credentials so Claude can act as the critic." >&2
+  echo "" >&2
+  if command -v ant >/dev/null 2>&1; then
+    # `ant` is installed but had no active profile — logging in is one command
+    # and avoids creating a key entirely, so lead with it.
+    echo "  Recommended: run  ant auth login  in another terminal, then re-run" >&2
+    echo "  this — no API key needed, and nothing gets stored by this plugin." >&2
+  else
+    echo "  Recommended: install the Anthropic CLI and run  ant auth login" >&2
+    echo "  — no API key needed, and nothing gets stored by this plugin." >&2
+  fi
+  echo "" >&2
+  echo "  Otherwise, paste an API key from https://console.anthropic.com/settings/keys" >&2
   printf "Paste your ANTHROPIC_API_KEY (input hidden), or leave blank to cancel: " >&2
   read -rs KEY_INPUT
   echo "" >&2
