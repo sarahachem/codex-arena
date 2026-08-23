@@ -27,6 +27,8 @@ Those two modes reach Claude *differently*, and it affects review quality, not j
 
 That's what "over the API" means in the table below.
 
+**So for reviewing code, prefer the conversational mode** — it's both better and cheaper. If you do review a diff standalone, generate it with generous context (`git diff -U50 > review.patch`), because the reviewer sees the file you hand it and nothing else. A default 3-line-context diff gives it almost nothing to judge against.
+
 One rule holds everywhere: **whichever model evaluates only ever judges** — it never writes the accepted fix. That's the other model's job. `--evaluator` picks who critiques; it has nothing to do with whether the artifact already exists (Codex reads and relays existing content either way).
 
 Which mode you get depends on your credentials:
