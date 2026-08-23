@@ -203,7 +203,19 @@ if [ "$INIT_MODE" -eq 1 ]; then
   deprecated or superseded
   (For those last two: name the concrete cost — the race it allows, the
   test that can't be written, the duplication it forces, the lifecycle bug
-  it invites. \"This is the newer way\" is not by itself a finding.)" ;;
+  it invites. \"This is the newer way\" is not by itself a finding.)
+- Production readiness — report these as specific findings, not a verdict:
+  * debug leftovers: stray logging, commented-out code, TODOs, stubbed or
+    hardcoded test values still wired in
+  * environment-specific values baked in rather than configured
+  * secrets reachable in logs, error messages, or process args
+  * missing timeouts, unbounded reads/retries/growth, leaked connections
+  * errors swallowed, or failing OPEN where they should fail closed
+  * internals leaked to users in error text
+  * a migration or deploy step the change needs but doesn't include; and
+    whether old and new versions can run side by side during a rolling
+    deploy
+- Tests covering the behavior actually changed" ;;
     3)
       GUESS_TYPE="implementation plan"
       DEFAULTS="- Security holes
