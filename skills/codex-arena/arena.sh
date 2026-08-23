@@ -191,18 +191,19 @@ if [ "$INIT_MODE" -eq 1 ]; then
 - Unnecessary complexity or a simpler alternative
 - Consistency with existing patterns in the surrounding code
 - Clean architecture: separation of concerns, no god classes/functions,
-  dependencies pointing inward (business logic not reaching into
-  transport/persistence details)
-- Structural choices making the code harder than it needs to be: mutable
-  state shared through module globals or singletons instead of passed in
-  (invites races, forces tests to patch and reset), a hand-rolled version
-  of something the language/platform/database already does correctly, an
-  inheritance chain where passing the behavior in would be simpler
-- Current language/framework idioms, not APIs that are deprecated or
-  superseded
+  business logic independent of UI framework, transport, and persistence
+- Structural choices making the code harder than it needs to be:
+  * mutable state reachable as a global/singleton/static instead of passed
+    in (invites races, forces tests to patch and reset)
+  * deep inheritance where passing the behavior in would be simpler (base
+    Activity/Fragment, UIViewController, base-component hierarchies)
+  * a hand-rolled version of something the platform already does correctly
+    (its concurrency primitives, DI, lifecycle, persistence, IPC)
+- Current idioms for THIS language and platform, not APIs that are
+  deprecated or superseded
   (For those last two: name the concrete cost — the race it allows, the
-  test that can't be written, the duplication it forces. \"This is the
-  newer way\" is not by itself a finding.)" ;;
+  test that can't be written, the duplication it forces, the lifecycle bug
+  it invites. \"This is the newer way\" is not by itself a finding.)" ;;
     3)
       GUESS_TYPE="implementation plan"
       DEFAULTS="- Security holes
