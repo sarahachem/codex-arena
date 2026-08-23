@@ -25,25 +25,30 @@ ARENA_KEY_FILE="$HOME/.claude/skills/codex-arena/.anthropic_key"
 # change, not just a credential swap.
 ARENA_OAUTH_BETA="oauth-2025-04-20"
 
-# True when the `ant` CLI is installed AND has an active credential source.
-# Checks the exit code, never the text: `ant auth status` prints a human
-# string, and grepping it for "logged in" would also match "Not logged in"
-# (exactly the bug this plugin's setup.sh already hit with `codex login`).
-_arena_have_ant_oauth() {
-  command -v ant >/dev/null 2>&1 || return 1
-  ant auth status >/dev/null 2>&1
-}
-
 # Prints a short-lived OAuth access token on stdout. Deliberately re-run for
-# every request rather than captured once: these tokens expire, and letting
-# `ant` mint a fresh one each time is what makes refresh transparent during a
-# long multi-round arena run. --access-token is required — the bare form
-# prints a JSON object, not a token.
+# every request rather than captured once: these tokens expire, and
+# print-credentials refreshes them as needed, which is what makes refresh
+# transparent during a long multi-round arena run. --access-token is required
+# — the bare form prints the whole credentials JSON, which yields an empty
+# response or an HTTP/2 error if stuffed into an Authorization header.
 _arena_oauth_token() {
   local token
   token="$(ant auth print-credentials --access-token 2>/dev/null)" || return 1
   [ -n "$token" ] || return 1
   printf '%s' "$token"
+}
+
+# True when the `ant` CLI is installed AND can actually mint a token.
+#
+# Deliberately NOT `ant auth status`: the CLI docs are explicit that status
+# "reports status only — don't script against its exit code as a health
+# check". Whether a token can be produced is the question we actually care
+# about, so ask that directly. This may hit the network to refresh an expired
+# token, but never makes a *billed* inference call — see the note on
+# anthropic_key_structurally_available below.
+_arena_have_ant_oauth() {
+  command -v ant >/dev/null 2>&1 || return 1
+  _arena_oauth_token >/dev/null 2>&1
 }
 
 # Appends the auth headers for the ACTIVE mode to the curl config file at $1.
@@ -101,12 +106,17 @@ _arena_try_oauth() {
   return 1
 }
 
-# True if a key looks structurally available WITHOUT any network call — env
-# var set, or a cached file that's readable/owned/non-symlink/non-empty. This
-# exists so a caller can announce "about to use a paid key" BEFORE the
-# validation call in try_load_anthropic_key_noninteractive() below actually
-# runs — that validation call is itself a real (tiny) billed API request, so
-# disclosure has to happen ahead of it, not after.
+# True if credentials look available WITHOUT any BILLED API call — env var
+# set, an `ant` OAuth profile that can mint a token, or a cached file that's
+# readable/owned/non-symlink/non-empty. This exists so a caller can announce
+# "about to use paid credentials" BEFORE the validation call in
+# try_load_anthropic_key_noninteractive() below actually runs — that
+# validation call is a real (tiny) billed API request, so disclosure has to
+# happen ahead of it, not after.
+#
+# The OAuth branch may touch the network to refresh an expired token, so this
+# is not strictly offline — but a token refresh costs nothing and bills
+# nothing, which is the property that actually matters here.
 anthropic_key_structurally_available() {
   if [ -n "${ANTHROPIC_ARENA_KEY:-}" ]; then
     return 0

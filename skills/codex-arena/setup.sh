@@ -129,7 +129,10 @@ fi
 say ""
 say "4. Anthropic credentials (optional — only for --evaluator claude)"
 if command -v ant >/dev/null 2>&1; then
-  if ant auth status >/dev/null 2>&1; then
+  # NOT `ant auth status` — it exits 0 even when the profile is unconfigured
+  # (verified against ant 1.26.1), and the CLI docs say not to script against
+  # its exit code. Whether a token can actually be minted is the real check.
+  if ant auth print-credentials --access-token >/dev/null 2>&1; then
     ok "logged in via 'ant auth' — no API key needed"
   else
     warn "the 'ant' CLI is installed but not logged in. Run:"
