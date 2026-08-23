@@ -393,7 +393,7 @@ else
         CRED_SOURCE="a key cached at $ARENA_KEY_FILE"
         CRED_OPTOUT="remove $ARENA_KEY_FILE"
       fi
-      echo "NOTE: Anthropic credentials found ($CRED_SOURCE) — if they validate, this run will make billed Anthropic API calls whenever Codex flags a problem (Codex only judges, Claude fixes). Not covered by any Claude Code/Claude.ai subscription. Ctrl-C now if that's not wanted; to force free self-fix mode instead: $CRED_OPTOUT." >&2
+      echo "NOTE: Anthropic credentials found ($CRED_SOURCE) — if they validate, this run will make real Anthropic API calls whenever Codex flags a problem (Codex only judges, Claude fixes), consuming your account's inference budget. Ctrl-C now if that's not wanted. To force free self-fix mode: $CRED_OPTOUT. To get Claude's review without any API spend, run the loop conversationally in Claude Code (/codex-arena) instead of this script." >&2
       # Loads AND validates in one non-interactive step — never falls through
       # to `read` on invalid credentials the way ensure_anthropic_key() would.
       if try_load_anthropic_key_noninteractive; then

@@ -59,7 +59,9 @@ bash ~/.claude/skills/codex-arena/setup.sh
   2. **An `ANTHROPIC_API_KEY`** from [console.anthropic.com](https://console.anthropic.com/settings/keys), via the environment or cached from a prior run.
   3. **An interactive prompt**, only the first time `--evaluator claude` runs with neither of the above.
 
-  Either way this is a separate, **billed** API path — not covered by a Claude Code or Claude.ai subscription. OAuth removes the key-management step, not the billing. Nothing prompts otherwise, and no cost is incurred unless credentials end up available.
+  Either way these are **real API calls that consume your Anthropic account's inference budget** — OAuth removes the key-management step, not the spending. (Exactly which bucket they bill to depends on your account; check the console if that matters to you.) Nothing prompts otherwise, and no cost is incurred unless credentials end up available.
+
+  **You can avoid this entirely by running the loop conversationally instead** (`/codex-arena` in Claude Code). There, Claude Code *is* the Claude in the loop — it reads Codex's critiques and writes the fixes directly, with no Anthropic API call and no extra spend. The API path exists because `arena.sh` runs unattended with no Claude Code session attached, so an API call is the only way it can reach a second model at all.
 
   > **Note:** because option 1 is auto-detected, running `ant auth login` for unrelated reasons will make a previously-free `--evaluator codex` run start spending on Claude adjudication. That's a better review, but it isn't free — `ant auth logout` (or running in a shell without the profile) opts back out.
 
