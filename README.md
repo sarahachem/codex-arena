@@ -20,6 +20,13 @@ Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended 
 
 **Standalone.** `arena.sh` runs the whole loop unattended.
 
+Those two modes reach Claude *differently*, and it affects review quality, not just cost:
+
+- **Conversationally, Claude Code is the Claude in the loop.** It has your repo and real tools — it can open a file, run the project's tests, and check a claim Codex made against the actual source. No API call happens.
+- **Standalone, there's no Claude Code session**, so `arena.sh` reaches Claude by HTTP request to the Anthropic API. That Claude is a single chat turn with **no tools and no repo access** — it sees only the text the script puts in the prompt. (`arena.sh` narrows the gap by pasting in the artifact's real content alongside whatever Codex said about it, so the reviewer isn't stuck with Codex's framing of its own work — but it still can't go look anything up.)
+
+That's what "over the API" means in the table below.
+
 One rule holds everywhere: **whichever model evaluates only ever judges** — it never writes the accepted fix. That's the other model's job. `--evaluator` picks who critiques; it has nothing to do with whether the artifact already exists (Codex reads and relays existing content either way).
 
 Which mode you get depends on your credentials:
