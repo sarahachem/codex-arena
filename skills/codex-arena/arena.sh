@@ -193,8 +193,15 @@ if [ "$INIT_MODE" -eq 1 ]; then
 - Clean architecture: separation of concerns, no god classes/functions,
   dependencies pointing inward (business logic not reaching into
   transport/persistence details)
-- Current idioms for the language/framework, not patterns that are
-  deprecated or superseded" ;;
+- Dated design/architecture patterns where a current, well-established one
+  fits better: deep inheritance where composition belongs, hand-rolled
+  machinery a standard primitive now covers, global/singleton state where
+  injected dependencies belong
+- Current language/framework idioms, not APIs that are deprecated or
+  superseded
+  (For those last two: flag what causes real friction — workarounds,
+  duplication, untestable seams, bugs the pattern invites. \"This is the
+  newer way\" is not by itself a finding.)" ;;
     3)
       GUESS_TYPE="implementation plan"
       DEFAULTS="- Security holes
