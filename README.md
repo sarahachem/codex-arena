@@ -18,7 +18,23 @@ Works two ways: conversationally in Claude Code (`/codex-arena`), or unattended 
 
 **Conversationally, with Claude Code.** Install the plugin, then say `/codex-arena` or ask Claude to review/generate something with it. Claude drives the loop, reads Codex's critiques, and can push back on findings it disagrees with, with the reason logged.
 
-**Standalone.** `arena.sh` runs the whole loop unattended, and either model can end up as the critic — the flag picks who, not whether the artifact is new or already exists (Codex reads/relays existing content either way). The rule is consistent everywhere: whichever model evaluates only ever judges — it never writes the accepted fix, that's the other model's job. By default (`--evaluator codex`) Codex critiques the artifact; who fixes it depends on whether Anthropic credentials are already available, checked silently at startup — no prompt, no billed action just from checking. Nothing found anywhere: Codex is the only model reachable at all in an unattended script, so it necessarily judges *and* fixes itself. Credentials found (an `ant auth login` OAuth profile, an env var, or a key cached from a prior `--evaluator claude` run): Codex only ever critiques from then on — a paid Claude API call writes every accepted fix (independently, not just accepting Codex's own proposed one) or disputes the finding and sends it back to Codex to withdraw or defend. This is fully automatic, not a flag — authenticate once (`ant auth login`, or `--evaluator claude`'s interactive prompt) and every subsequent `--evaluator codex` run picks it up on its own. `--init` asks you for criteria in plain English at the start, and it stops once, at the end, to ask whether to actually write the result to disk (with a diff shown first). There's also `--evaluator claude`, which flips the roles entirely: Codex reads (or, for a new artifact, generates) the content and does the fixing, and Claude is the one evaluating it via the same direct, separately-billed Anthropic API call (needs its own credentials — an `ant auth login` profile or an `ANTHROPIC_API_KEY` — not a Claude Code/Claude.ai subscription).
+**Standalone.** `arena.sh` runs the whole loop unattended.
+
+One rule holds everywhere: **whichever model evaluates only ever judges** — it never writes the accepted fix. That's the other model's job. `--evaluator` picks who critiques; it has nothing to do with whether the artifact already exists (Codex reads and relays existing content either way).
+
+Which mode you get depends on your credentials:
+
+| | Who critiques | Who writes the fix | Cost |
+|---|---|---|---|
+| `--evaluator codex`, no Anthropic credentials | Codex | Codex — it's the only model an unattended script can reach, so it self-reviews | Free |
+| `--evaluator codex`, credentials found | Codex | Claude, via a paid API call — writes its own fix (not just accepting Codex's proposal), or disputes the finding back to Codex to withdraw or defend | Billed |
+| `--evaluator claude` | Claude, via a paid API call | Codex — which also generates the artifact if it doesn't exist yet | Billed |
+
+The middle row is **automatic, not a flag**: credentials are detected silently at startup — an `ant auth login` profile, `ANTHROPIC_ARENA_KEY`, or a key cached from a prior run. Authenticate once and every later `--evaluator codex` run picks it up on its own.
+
+Because that's automatic, the script tells you before spending: it prints which credential source it found and exactly how to opt out of it (the opt-out differs — `ant auth logout` for a profile, unsetting the env var, or deleting the cache file). No billed call happens just from checking.
+
+Two other flags worth knowing: `--init` asks for your criteria in plain English up front, and the run stops once at the very end to ask whether to write the result to disk, showing a diff first.
 
 ## Install
 

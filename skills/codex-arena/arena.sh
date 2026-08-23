@@ -24,12 +24,12 @@
 #     Runs the full conversation using an existing brief file.
 #
 #   --evaluator codex (default): Codex critiques an existing artifact. Who fixes
-#     it depends on whether an Anthropic API key is already available — checked
-#     silently, no prompt, no billed action just from checking:
-#       - No key found anywhere (env var, or the cache at
-#         ~/.claude/skills/codex-arena/.anthropic_key): Codex is the only model
-#         reachable in this unattended script, so it judges AND writes its own
-#         fix, self-reviewed round after round. This is the plain free default.
+#     it depends on whether Anthropic credentials are already available —
+#     checked silently, no prompt, no billed call just from checking:
+#       - Nothing found anywhere (an `ant auth login` profile, an env var, or
+#         the cache at ~/.claude/skills/codex-arena/.anthropic_key): Codex is
+#         the only model reachable in this unattended script, so it judges AND
+#         writes its own fix, self-reviewed round after round. Free default.
 #       - A key IS found: Codex becomes evaluator-only — it critiques but never
 #         writes the accepted fix. Claude (via that key, the same paid path
 #         --evaluator claude uses) either writes its own corrected version each
@@ -357,7 +357,7 @@ if [ "$EVALUATOR" = "claude" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/claude_auth.sh"
   if ! ensure_anthropic_key; then
-    echo "error: no Anthropic API key — can't run --evaluator claude without one" >&2
+    echo "error: no Anthropic credentials — can't run --evaluator claude without them. Run 'ant auth login' (no API key needed), or set ANTHROPIC_ARENA_KEY." >&2
     exit 2
   fi
   echo "evaluator: claude (Codex builds, Claude evaluates via direct API call)"
@@ -373,25 +373,40 @@ else
   if [ -f "$SCRIPT_DIR/claude_auth.sh" ] && [ -f "$SCRIPT_DIR/claude_call.sh" ]; then
     # shellcheck disable=SC1091
     source "$SCRIPT_DIR/claude_auth.sh"
-    # Structural check first (no network call) so the billing notice can be
-    # printed BEFORE the validation call below — which is itself a real, tiny
-    # billed Anthropic request. Disclosure has to happen ahead of that call,
-    # not after it.
+    # Structural check first — it makes no BILLED call (it may hit the network
+    # to refresh an OAuth token, which costs nothing) — so the billing notice
+    # can be printed BEFORE the validation call below, which IS a real, tiny
+    # billed Anthropic request. Disclosure has to happen ahead of that call.
     if anthropic_key_structurally_available; then
-      echo "NOTE: an Anthropic API key appears to be available — if it validates, this run will make billed Anthropic API calls whenever Codex flags a problem (Codex only judges, Claude fixes). Not covered by any Claude Code/Claude.ai subscription. Ctrl-C now if that's not wanted; unset ANTHROPIC_ARENA_KEY or remove $ARENA_KEY_FILE to force free self-fix mode instead." >&2
+      # Name the actual credential source, because the opt-out differs per
+      # source and printing the wrong one is worse than printing none:
+      # "unset ANTHROPIC_ARENA_KEY" does nothing for someone authenticated
+      # through an `ant auth login` profile, who would follow the advice and
+      # still get billed.
+      if [ -n "${ANTHROPIC_ARENA_KEY:-}" ]; then
+        CRED_SOURCE="ANTHROPIC_ARENA_KEY is set"
+        CRED_OPTOUT="unset ANTHROPIC_ARENA_KEY"
+      elif _arena_have_ant_oauth; then
+        CRED_SOURCE="an 'ant auth login' profile"
+        CRED_OPTOUT="run 'ant auth logout', or run this from a shell without that profile"
+      else
+        CRED_SOURCE="a key cached at $ARENA_KEY_FILE"
+        CRED_OPTOUT="remove $ARENA_KEY_FILE"
+      fi
+      echo "NOTE: Anthropic credentials found ($CRED_SOURCE) — if they validate, this run will make billed Anthropic API calls whenever Codex flags a problem (Codex only judges, Claude fixes). Not covered by any Claude Code/Claude.ai subscription. Ctrl-C now if that's not wanted; to force free self-fix mode instead: $CRED_OPTOUT." >&2
       # Loads AND validates in one non-interactive step — never falls through
-      # to `read` on an invalid key the way ensure_anthropic_key() would.
+      # to `read` on invalid credentials the way ensure_anthropic_key() would.
       if try_load_anthropic_key_noninteractive; then
         API_ARBITER=1
       else
-        echo "NOTE: that key didn't validate — continuing in free self-fix mode instead." >&2
+        echo "NOTE: those credentials didn't validate — continuing in free self-fix mode instead." >&2
       fi
     fi
   fi
   if [ "$API_ARBITER" -eq 1 ]; then
-    echo "evaluator: codex, with Claude fixing (Anthropic API key validated — Codex only judges, Claude writes every accepted fix or disputes the finding back to Codex)"
+    echo "evaluator: codex, with Claude fixing (Anthropic credentials validated via ${ANTHROPIC_ARENA_AUTH_MODE:-api_key} — Codex only judges, Claude writes every accepted fix or disputes the finding back to Codex)"
   else
-    echo "evaluator: codex (no Anthropic API key found — Codex judges and fixes itself, read-only every round)"
+    echo "evaluator: codex (no Anthropic credentials found — Codex judges and fixes itself, read-only every round)"
   fi
 fi
 
