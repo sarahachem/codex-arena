@@ -1,5 +1,6 @@
 {
   "name": "codex-arena",
+  "version": "1.0.0",
   "description": "Bounded adversarial review-and-revise loop between Claude Code and the OpenAI Codex CLI, for any artifact (a synthetic dataset, a plan, a diff, a config). Codex critiques read-only and proposes fixes as text, Claude (or you) decides what's worth acting on, and the loop runs automatically until Codex approves or a round/token budget runs out. Includes a standalone script (arena.sh) that runs the whole loop without Claude in the room, taking your criteria in plain English.",
   "author": {
     "name": "Sarah Achem"
