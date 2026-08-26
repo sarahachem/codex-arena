@@ -1,5 +1,6 @@
 {
   "name": "codex-arena",
+  "description": "Bounded adversarial review-and-revise loop between Claude Code and the OpenAI Codex CLI, for any artifact (a synthetic dataset, a plan, a diff, a config).",
   "owner": {
     "name": "Sarah Achem"
   },
